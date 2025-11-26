@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 # ==========================================
 # PARAMÈTRES À RÉGLER
 # ==========================================
-FILENAME = "data/mur_de_prise_3.ply"
+FILENAME = "lecteur_data/data/mur_de_prise_3.ply"
 
 # RANSAC (Mur)
 RANSAC_THRESH = 0.015      # Distance (m) pour être considéré comme "mur" (2cm)
