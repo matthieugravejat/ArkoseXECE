@@ -1,0 +1,31 @@
+================================================================================
+RÉSULTATS DES MATCHINGS MULTIPLES
+================================================================================
+
+Date: 2025-11-25 16:16:53
+Source: /Users/lilianrage/Documents/Documents - Ordinateur portable de Lilian/ECE/Cours/ING 5/PFE/Code_3D_NDP/Matching_zones/zones_haute_densite/zone_20251125_140005.ply
+Nombre de cibles testées: 6
+
+Rang  Cible                                    Fitness         RMSE (mm)       Points    
+-------------------------------------------------------------------------------------
+1     Prise sur mur.ply                        0.880388        3.715           27473     
+2     prise2.ply                               0.517241        5.269           25837     
+3     prise4.ply                               0.409483        5.230           24590     
+4     prise1.ply                               0.401940        4.940           27961     
+5     prise3.ply                               0.354526        5.001           27435     
+6     prise9.ply                               0.267241        4.689           13124     
+
+================================================================================
+DÉTAILS DU MEILLEUR MATCH:
+================================================================================
+
+Cible: Prise sur mur.ply
+Fitness: 0.880388
+RMSE: 3.715 mm
+Points de la cible: 27,473
+
+Matrice de transformation:
+[[-0.99206195 -0.03471399  0.1208637  -0.00128144]
+ [ 0.09247365  0.44993342  0.88826153 -0.01322358]
+ [-0.08521572  0.89238717 -0.44315169 -0.0020913 ]
+ [ 0.          0.          0.          1.        ]]
