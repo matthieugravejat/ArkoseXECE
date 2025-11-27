@@ -2,7 +2,7 @@ import open3d as o3d
 import os
 
 # Parcourt simplement tous les fichiers du dossier 'data' et les charge
-data_dir = "data"
+data_dir = "../Matching_zones/data_PLY"
 
 for fname in os.listdir(data_dir):
     chemin_fichier = os.path.join(data_dir, fname)
