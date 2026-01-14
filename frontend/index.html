@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="HoldGen - Gestionnaire de prises pour salle d'escalade">
+    <title>HoldGen - Gestionnaire de Salle d'Escalade</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+
+<body>
+    <!-- Header avec Logo -->
+    <header class="header">
+        <div class="logo">
+            <span class="logo-icon">◇</span>
+            <span class="logo-text">HoldGen</span>
+        </div>
+    </header>
+
+    <!-- Contenu Principal -->
+    <main class="main-content">
+        <!-- Titre de la section -->
+        <div class="section-title">
+            <h1>Plan de la Salle</h1>
+            <p>Cliquez sur un mur pour télécharger un fichier</p>
+        </div>
+
+        <!-- Plan SVG de la salle d'escalade - Reproduction EXACTE -->
+        <div class="plan-container">
+            <svg viewBox="0 0 520 580" class="climbing-plan" id="climbingPlan">
+
+                <!-- ========== ZONE PRINCIPALE - CONTOUR EXTÉRIEUR ========== -->
+
+                <!-- MUR 1: Grand trapèze gris FONCÉ en haut à gauche -->
+                <g class="wall-group" data-wall="mur-1" data-name="Mur 1">
+                    <polygon class="wall wall-dark" points="48,72 48,140 115,140 140,105 140,52 95,52" />
+                </g>
+
+                <!-- MUR 2: Bande supérieure gris CLAIR (après mur 1) -->
+                <g class="wall-group" data-wall="mur-2" data-name="Mur 2">
+                    <polygon class="wall wall-light" points="140,52 140,82 320,62 320,38" />
+                </g>
+
+                <!-- MUR 3: Segment supérieur centre gris MOYEN -->
+                <g class="wall-group" data-wall="mur-3" data-name="Mur 3">
+                    <polygon class="wall" points="320,38 320,65 390,55 420,60 420,40" />
+                </g>
+
+                <!-- MUR 4: Segment supérieur droit gris FONCÉ -->
+                <g class="wall-group" data-wall="mur-4" data-name="Mur 4">
+                    <polygon class="wall wall-dark" points="420,40 420,65 460,75 475,75 475,48" />
+                </g>
+
+                <!-- MUR 5: Angle supérieur droit gris MOYEN -->
+                <g class="wall-group" data-wall="mur-5" data-name="Mur 5">
+                    <polygon class="wall" points="475,48 475,110 450,110 450,80 460,75" />
+                </g>
+
+                <!-- MUR 6: Côté droit vertical haut gris FONCÉ -->
+                <g class="wall-group" data-wall="mur-6" data-name="Mur 6">
+                    <polygon class="wall wall-dark" points="450,110 475,110 475,170 450,170" />
+                </g>
+
+                <!-- MUR 7: Côté droit vertical bas gris MOYEN -->
+                <g class="wall-group" data-wall="mur-7" data-name="Mur 7">
+                    <polygon class="wall" points="450,170 475,170 475,220 425,220 425,195" />
+                </g>
+
+                <!-- MUR 8: Mur diagonal sud-est gris CLAIR -->
+                <g class="wall-group" data-wall="mur-8" data-name="Mur 8">
+                    <polygon class="wall wall-light" points="425,195 425,255 310,280 310,230" />
+                </g>
+
+                <!-- MUR 9: Mur sud horizontal gris CLAIR (avec encoche) -->
+                <g class="wall-group" data-wall="mur-9" data-name="Mur 9">
+                    <polygon class="wall wall-light"
+                        points="310,230 310,280 160,280 160,300 105,300 105,255 195,255 195,230" />
+                </g>
+
+                <!-- MUR 10: Segment encoche sud-ouest gris MOYEN -->
+                <g class="wall-group" data-wall="mur-10" data-name="Mur 10">
+                    <polygon class="wall" points="105,255 105,310 78,318 48,318 48,270 78,270" />
+                </g>
+
+
+                <!-- ========== ÎLOT CENTRAL (3 segments) ========== -->
+
+                <g class="wall-group central-island" data-wall="ilot-1" data-name="Ilot Haut Gauche">
+                    <polygon class="wall wall-island" points="180,125 180,145 280,155 280,135" />
+                </g>
+
+                <g class="wall-group central-island" data-wall="ilot-2" data-name="Ilot Haut Droite">
+                    <polygon class="wall wall-island" points="285,135 285,155 390,140 390,120" />
+                </g>
+
+                <g class="wall-group central-island" data-wall="ilot-3" data-name="Ilot Bas Gauche">
+                    <polygon class="wall wall-island" points="180,165 180,185 245,195 245,175" />
+                </g>
+
+                <g class="wall-group central-island" data-wall="ilot-4" data-name="Ilot Bas Centre">
+                    <polygon class="wall wall-island" points="250,175 250,195 325,200 325,180" />
+                </g>
+
+                <g class="wall-group central-island" data-wall="ilot-5" data-name="Ilot Bas Droite">
+                    <polygon class="wall wall-island" points="330,180 330,200 390,190 390,165" />
+                </g>
+
+
+
+                <!-- ========== FLÈCHES DE CONNEXION ========== -->
+                <g class="connection-arrows" style="pointer-events: none;">
+                    <path d="M 62,325 C 50,345 50,370 62,390" fill="none" stroke="#aaa" stroke-width="1.5" />
+                    <polygon points="58,322 66,322 62,330" fill="#aaa" />
+                    <polygon points="58,393 66,393 62,385" fill="#aaa" />
+                </g>
+
+                <!-- ========== ZONE INFÉRIEURE (10 sections) ========== -->
+
+                <!-- La zone gris clair au centre n'est PAS cliquable -->
+                <!-- Zone centrale gris très clair (fond, non cliquable) -->
+                <polygon class="floor-area" points="75,430 75,515 460,485 460,405" fill="#f3f4f6" stroke="none" />
+
+                <!-- MUR 1 BAS: Coin gauche avec bord arrondi descendant (gris FONCÉ) -->
+                <g class="wall-group" data-wall="mur-bas-1" data-name="Mur Bas 1">
+                    <polygon class="wall wall-dark" points="35,378 35,480 55,480 55,405 75,405 75,378" />
+                </g>
+
+                <!-- MUR 2 BAS: Segment supérieur gauche (gris FONCÉ) - horizontal -->
+                <g class="wall-group" data-wall="mur-bas-2" data-name="Mur Bas 2">
+                    <polygon class="wall wall-dark" points="75,378 75,405 180,405 180,378" />
+                </g>
+
+                <!-- MUR 3 BAS: Segment supérieur avec bosse/encoche (gris CLAIR) -->
+                <g class="wall-group" data-wall="mur-bas-3" data-name="Mur Bas 3">
+                    <polygon class="wall wall-light" points="180,378 180,400 350,400 350,378" />
+                </g>
+
+                <!-- MUR 4 BAS: Segment supérieur milieu-droite (gris MOYEN) -->
+                <g class="wall-group" data-wall="mur-bas-4" data-name="Mur Bas 4">
+                    <polygon class="wall" points="350,378 350,405 450,405 450,378" />
+                </g>
+
+                <!-- MUR 5 BAS: Segment supérieur droite (gris FONCÉ) -->
+                <g class="wall-group" data-wall="mur-bas-5" data-name="Mur Bas 5">
+                    <polygon class="wall wall-dark" points="410,378 410,405 470,405 470,430 485,430 485,378" />
+                </g>
+
+                <!-- MUR 6 BAS: Coin droit vertical (gris MOYEN) -->
+                <g class="wall-group" data-wall="mur-bas-6" data-name="Mur Bas 6">
+                    <polygon class="wall" points="460,415 485,415 485,500 460,500" />
+                </g>
+
+                <!-- ===== 4 MURS DU BAS AVEC PENTE (de gauche à droite) ===== -->
+
+                <!-- MUR 7 BAS: Segment inférieur gauche avec pente (gris FONCÉ) -->
+                <g class="wall-group" data-wall="mur-bas-7" data-name="Mur Bas 7">
+                    <polygon class="wall wall-dark" points="35,530 35,560 130,555 130,520" />
+                </g>
+
+                <!-- MUR 8 BAS: Segment inférieur centre-gauche avec pente (gris MOYEN) -->
+                <g class="wall-group" data-wall="mur-bas-8" data-name="Mur Bas 8">
+                    <polygon class="wall" points="130,520 130,555 280,548 280,512" />
+                </g>
+
+                <!-- MUR 9 BAS: Segment inférieur centre-droite avec pente (gris CLAIR) -->
+                <g class="wall-group" data-wall="mur-bas-9" data-name="Mur Bas 9">
+                    <polygon class="wall wall-light" points="280,512 280,548 400,540 400,502" />
+                </g>
+
+                <!-- MUR 10 BAS: Segment inférieur droite avec pente (gris MOYEN) -->
+                <g class="wall-group" data-wall="mur-bas-10" data-name="Mur Bas 10">
+                    <polygon class="wall" points="400,502 400,540 485,535 485,495" />
+                </g>
+
+            </svg>
+        </div>
+
+        <!-- Zone de Drop (apparaît quand un mur est sélectionné) -->
+        <div class="dropzone-container" id="dropzoneContainer">
+            <div class="selected-wall-info" id="selectedWallInfo">
+                <span class="wall-indicator"></span>
+                <span class="wall-name">Aucun mur sélectionné</span>
+                <button class="close-btn" id="closeDropzone">✕</button>
+            </div>
+
+            <div class="dropzone" id="dropzone">
+                <div class="dropzone-content">
+                    <div class="dropzone-icon">
+                        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                            <polyline points="17 8 12 3 7 8" />
+                            <line x1="12" y1="3" x2="12" y2="15" />
+                        </svg>
+                    </div>
+                    <p class="dropzone-text">Glissez-déposez votre fichier PLY de mur ici</p>
+                    <p class="dropzone-subtext">ou</p>
+                    <label class="file-input-label">
+                        Parcourir
+                        <input type="file" id="fileInput" class="file-input" accept=".ply">
+                    </label>
+                    <p class="file-types">Format accepté: .ply uniquement</p>
+                </div>
+            </div>
+
+            <!-- Visualisation 3D du mur avec sélection -->
+            <div class="preview-section" id="previewSection">
+                <div class="preview-header">
+                    <div class="file-info-inline">
+                        <span class="file-icon-small">PLY</span>
+                        <span class="file-name" id="fileName">mur.ply</span>
+                        <span class="file-size" id="fileSize">0 KB</span>
+                    </div>
+                    <button class="remove-file-btn" id="removeFile">✕ Supprimer</button>
+                </div>
+
+                <!-- Instructions de sélection -->
+                <div class="selection-instructions" id="selectionInstructions">
+                    <div class="instruction-text">
+                        <strong>Cliquez sur les prises</strong> que vous souhaitez identifier.
+                        Chaque prise sera automatiquement isolée et colorée.
+                    </div>
+                </div>
+
+                <!-- Badge nombre de prises -->
+                <div class="hold-count-badge" id="holdCountBadge" style="display: none;">
+                    0 prise(s) sélectionnée(s)
+                </div>
+
+                <div class="preview-viewer" id="previewViewer">
+                    <canvas id="previewCanvas"></canvas>
+                    <div class="viewer-controls">
+                        <span class="control-hint">Glisser pour pivoter - Clic pour sélectionner une prise</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Bouton d'analyse -->
+            <div class="analyze-section">
+                <button class="analyze-btn" id="analyzeBtn" disabled>
+                    <span class="analyze-icon">→</span>
+                    <span class="analyze-text">Identifier les prises sélectionnées</span>
+                </button>
+
+                <!-- Indicateur de chargement -->
+                <div class="loading-inline" id="loadingInline">
+                    <div class="loading-header">
+                        <div class="loading-spinner"></div>
+                        <span class="loading-text" id="loadingText">Analyse en cours...</span>
+                    </div>
+                    <div class="progress-container" id="progressContainer">
+                        <div class="progress-bar-wrapper">
+                            <div class="progress-bar-fill" id="progressBar"></div>
+                        </div>
+                        <div class="progress-info">
+                            <span class="progress-percent" id="progressPercent">0%</span>
+                            <span class="progress-detail" id="progressDetail">0 / 0 fichiers</span>
+                        </div>
+                        <div class="progress-current" id="progressCurrent"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Zone de résultats avec visualisation 3D -->
+        <div class="results-container" id="resultsContainer">
+            <div class="results-header">
+                <h2>Résultats du Matching</h2>
+                <button class="new-analysis-btn" id="newAnalysisBtn">Nouvelle analyse</button>
+            </div>
+
+            <div class="source-info" id="sourceInfo">
+                <!-- Infos source remplies dynamiquement -->
+            </div>
+
+            <div class="results-grid" id="resultsGrid">
+                <!-- Les résultats seront insérés ici -->
+            </div>
+
+            <div class="no-results" id="noResults">
+                <p>Aucune correspondance trouvée</p>
+                <p class="no-results-hint">Essayez avec un autre fichier PLY</p>
+            </div>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <p>© 2026 HoldGen - Duplication de Salles d'Escalade</p>
+    </footer>
+
+    <!-- Three.js pour la visualisation 3D -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/PLYLoader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="app.js"></script>
+</body>
+
+</html>
