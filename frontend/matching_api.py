@@ -13,6 +13,9 @@ import numpy as np
 from pathlib import Path
 from colorsys import rgb_to_hsv
 import traceback
+import trimesh
+from PIL import Image
+import matplotlib.colors as mcolors
 
 app = Flask(__name__)
 CORS(app)  # Permettre les requêtes cross-origin depuis le frontend
@@ -131,6 +134,71 @@ def compute_color_match(source_hsv, target_hsv, hue_threshold=60.0, value_thresh
                 return True, f"Même teinte (ΔH={hue_diff:.0f}°)"
             else:
                 return False, f"Teinte différente"
+
+
+# =====================================================================
+# CONVERSION GLB VERS PLY AVEC COULEURS
+# =====================================================================
+
+def convert_glb_to_colored_ply(glb_path, ply_path):
+    """
+    Convertit un fichier GLB en PLY avec couleurs bakées depuis la texture.
+    Inspiré de convert_glb_to_pcd_ply.py
+    
+    Args:
+        glb_path: Chemin vers le fichier GLB source
+        ply_path: Chemin où sauvegarder le fichier PLY
+    
+    Returns:
+        o3d.geometry.PointCloud: Le point cloud coloré
+    """
+    # Charger le GLB avec trimesh
+    tm = trimesh.load(glb_path)
+    
+    # Fusionner les sous-meshes si c'est une scène
+    if isinstance(tm, trimesh.Scene):
+        print("GLB détecté comme Scene → fusion des sous-mesh")
+        mesh = trimesh.util.concatenate([m for m in tm.geometry.values()])
+    else:
+        mesh = tm
+    
+    vertices = mesh.vertices
+    faces = mesh.faces
+    
+    # Vérifier qu'il y a une texture
+    if mesh.visual.kind != "texture":
+        raise ValueError("Le GLB n'a pas de texture UV à baker.")
+    
+    # Récupérer la texture PIL
+    base_tex = mesh.visual.material.baseColorTexture
+    if base_tex is None:
+        raise ValueError("Le matériau n'a pas de baseColorTexture.")
+    texture_image = base_tex.convert("RGB")  # c'est déjà un PIL Image
+    
+    tex_w, tex_h = texture_image.size
+    tex_pixels = np.array(texture_image)
+    
+    # UV → pixels
+    uv = mesh.visual.uv  # Nx2
+    u = (uv[:,0] * (tex_w - 1)).astype(int)
+    v = ((1 - uv[:,1]) * (tex_h - 1)).astype(int)
+    
+    vertex_colors = tex_pixels[v, u, :]
+    
+    # Créer le mesh Open3D et sauvegarder en PLY
+    mesh_o3d = o3d.geometry.TriangleMesh()
+    mesh_o3d.vertices = o3d.utility.Vector3dVector(vertices)
+    mesh_o3d.triangles = o3d.utility.Vector3iVector(faces)
+    mesh_o3d.vertex_colors = o3d.utility.Vector3dVector(vertex_colors / 255.0)
+    mesh_o3d.compute_vertex_normals()
+    
+    # Sauvegarder le PLY
+    o3d.io.write_triangle_mesh(ply_path, mesh_o3d)
+    print(f"PLY coloré sauvegardé dans : {ply_path}")
+    
+    # Convertir en point cloud pour retourner
+    pcd = o3d.io.read_point_cloud(ply_path)
+    return pcd
 
 
 # =====================================================================
@@ -445,7 +513,7 @@ class HoldMatcherAPI:
                     o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
                     o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(0.05)
                 ],
-                criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(50000, 500)
+                criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(500000, 500)
             )
             
             result_icp = o3d.pipelines.registration.registration_icp(
@@ -650,6 +718,90 @@ def ply_to_json():
         })
         
     except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/convert_glb', methods=['POST'])
+def convert_glb():
+    """
+    Convertit un fichier GLB en PLY avec couleurs et crée une session pour l'isolation des prises.
+    Cette route fonctionne comme /api/load_wall mais accepte les fichiers GLB.
+    """
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'Aucun fichier reçu'}), 400
+        
+        file = request.files['file']
+        
+        if not file.filename.lower().endswith('.glb'):
+            return jsonify({'error': 'Format non supporté. Seuls les fichiers .glb sont acceptés'}), 400
+        
+        # Sauvegarder temporairement le GLB
+        with tempfile.NamedTemporaryFile(suffix='.glb', delete=False) as tmp_glb:
+            file.save(tmp_glb.name)
+            tmp_glb_path = tmp_glb.name
+        
+        # Créer un fichier temporaire pour le PLY
+        tmp_ply_path = tmp_glb_path.replace('.glb', '.ply')
+        
+        try:
+            # Convertir GLB vers PLY avec couleurs
+            pcd = convert_glb_to_colored_ply(tmp_glb_path, tmp_ply_path)
+            
+            if len(pcd.points) == 0:
+                return jsonify({'error': 'Fichier GLB vide ou corrompu'}), 400
+            
+            # Détecter le plan du mur (comme dans load_wall)
+            plane_model, wall_mask = detect_wall_plane_api(pcd)
+            
+            if plane_model is None:
+                return jsonify({'error': 'Aucun plan de mur détecté'}), 400
+            
+            # Créer une session (comme dans load_wall)
+            import uuid
+            session_id = str(uuid.uuid4())
+            
+            wall_sessions[session_id] = {
+                'pcd': pcd,
+                'plane_model': list(plane_model),
+                'wall_mask': wall_mask,
+                'tmp_path': tmp_ply_path,  # Garder le PLY converti
+                'isolated_holds': [],
+                'hold_indices': []
+            }
+            
+            # Préparer les points pour le frontend
+            points = np.asarray(pcd.points).astype(np.float32)
+            center = points.mean(axis=0)
+            points_centered = points - center
+            
+            # Récupérer les couleurs
+            colors = None
+            if pcd.has_colors():
+                colors = (np.asarray(pcd.colors) * 255).astype(np.uint8).tolist()
+            
+            wall_points_count = int(np.sum(wall_mask))
+            
+            return jsonify({
+                'success': True,
+                'session_id': session_id,
+                'total_points': len(points),
+                'wall_points': wall_points_count,
+                'non_wall_points': len(points) - wall_points_count,
+                'points': points_centered.tolist(),
+                'colors': colors,
+                'center': center.tolist(),
+                'message': f'GLB converti avec succès: {len(points)} points'
+            })
+            
+        finally:
+            # Nettoyer seulement le fichier GLB temporaire
+            # Le PLY est gardé dans la session
+            if os.path.exists(tmp_glb_path):
+                os.remove(tmp_glb_path)
+                
+    except Exception as e:
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
@@ -865,6 +1017,124 @@ def match_stream():
 # Stockage temporaire des murs chargés et des prises isolées
 wall_sessions = {}
 
+# ==========================================
+# CONSTANTES POUR DBSCAN (AUTO ISOLATION)
+# ==========================================
+SEUIL_RANSAC_CM = 0.09
+NB_ITERATIONS_DECAPAGE = 3
+MIN_POINTS_POUR_MUR = 5000
+
+SEUIL_LUMINOSITE_NOIR = 0.45
+SEUIL_SATURATION_MIN = 0.20
+HUE_BOIS_MIN = 0.05
+HUE_BOIS_MAX = 0.105
+SEUIL_SATURATION_FLUO = 0.40
+
+# Distance de fusion DBSCAN
+DBSCAN_EPS = 0.03
+DBSCAN_MIN_POINTS = 10
+MIN_CLUSTER_SIZE = 100
+
+def get_dominant_color_name_dbscan(pcd):
+    """Détermine la couleur dominante d'un cluster (méthode script DBSCAN)."""
+    if not pcd.has_colors() or len(pcd.points) == 0: return "inconnu"
+    rgb = np.asarray(pcd.colors)
+    avg_rgb = np.median(rgb, axis=0)
+    h, s, v = mcolors.rgb_to_hsv(avg_rgb)
+    
+    if v < SEUIL_LUMINOSITE_NOIR: return "noir"
+    if s < 0.15: return "gris"
+    if h < 0.05 or h > 0.92: return "rouge"
+    if 0.05 <= h < 0.11: return "orange"
+    if 0.11 <= h < 0.28: return "jaune"
+    if 0.28 <= h < 0.48: return "vert"
+    if 0.48 <= h < 0.70: return "bleu"
+    if 0.70 <= h < 0.92: return "violet"
+    return "autre"
+
+def auto_isolate_dbscan_api(pcd):
+    """
+    Isole les prises automatiquement via DBSCAN.
+    Retourne une liste de clusters (indices des points) ET les indices des points candidats (sans mur).
+    """
+    # On garde un tableau d'indices `original_indices` qui suit les coupes.
+    current_pcd = pcd
+    current_original_indices = np.arange(len(pcd.points))
+    
+    print(f"Auto-Isolation: {len(current_pcd.points)} points initiaux")
+    
+    # 1. Nettoyage RANSAC (Bulldozer)
+    for i in range(NB_ITERATIONS_DECAPAGE):
+        plane_model, inliers = current_pcd.segment_plane(distance_threshold=SEUIL_RANSAC_CM/100,
+                                                         ransac_n=3,
+                                                         num_iterations=1000)
+        if len(inliers) < MIN_POINTS_POUR_MUR:
+            break
+            
+        # Les inliers sont relatifs à current_pcd
+        current_pcd = current_pcd.select_by_index(inliers, invert=True)
+        current_original_indices = np.delete(current_original_indices, inliers)
+        
+    print(f"Après RANSAC: {len(current_pcd.points)} points")
+    
+    # 2. Filtre Couleur
+    if current_pcd.has_colors():
+        rgb = np.asarray(current_pcd.colors)
+        hsv = mcolors.rgb_to_hsv(rgb)
+        h, s, v = hsv[:, 0], hsv[:, 1], hsv[:, 2]
+
+        mask_noir = (v < SEUIL_LUMINOSITE_NOIR)
+        mask_bois = (h >= HUE_BOIS_MIN) & (h <= HUE_BOIS_MAX) & (s < SEUIL_SATURATION_FLUO)
+        mask_gris = (s < SEUIL_SATURATION_MIN) & (v >= SEUIL_LUMINOSITE_NOIR)
+
+        final_mask = mask_noir | (~mask_bois & ~mask_gris)
+        ind_keep = np.where(final_mask)[0]
+        
+        current_pcd = current_pcd.select_by_index(ind_keep)
+        current_original_indices = current_original_indices[ind_keep]
+        
+    print(f"Après Couleur: {len(current_pcd.points)} points")
+    
+    if len(current_pcd.points) == 0:
+        return [], []
+
+    # 3. Nettoyage Bruit
+    try:
+        current_pcd, ind_clean = current_pcd.remove_statistical_outlier(nb_neighbors=50, std_ratio=1.0)
+        current_original_indices = current_original_indices[ind_clean]
+    except:
+        pass # Peut échouer si trop peu de points
+        
+    # POINTS CANDIDATS (juste avant DBSCAN)
+    candidate_indices = current_original_indices.tolist()
+
+    # 4. Clustering DBSCAN
+    labels = np.array(current_pcd.cluster_dbscan(eps=DBSCAN_EPS, min_points=DBSCAN_MIN_POINTS))
+    
+    if len(labels) == 0:
+        return [], candidate_indices
+        
+    unique_labels = np.unique(labels)
+    clusters = []
+    
+    print(f"DBSCAN: {len(unique_labels)} clusters trouvés")
+    
+    for label in unique_labels:
+        if label == -1: continue # Bruit
+        
+        idx_cluster_local = np.where(labels == label)[0]
+        
+        if len(idx_cluster_local) < MIN_CLUSTER_SIZE:
+            continue
+            
+        # Récupérer les vrais indices
+        cluster_original_indices = current_original_indices[idx_cluster_local].tolist()
+        clusters.append(cluster_original_indices)
+        
+    print(f"Clusters valides conservés: {len(clusters)}")
+    return clusters, candidate_indices
+    
+
 from collections import deque
 
 def detect_wall_plane_api(pcd, config=None):
@@ -1043,6 +1313,7 @@ def isolate_hold():
         
         session_id = data.get('session_id')
         point_index = data.get('point_index')
+        algo = data.get('algo', 'manual')  # 'manual' ou 'dbscan'
         
         if not session_id or session_id not in wall_sessions:
             return jsonify({'error': 'Session invalide'}), 400
@@ -1055,8 +1326,8 @@ def isolate_hold():
         plane_model = session['plane_model']
         wall_mask = session['wall_mask']
         
-        # Vérifier que le point n'est pas sur le mur
-        if wall_mask[point_index]:
+        # Vérifier que le point n'est pas sur le mur (sauf en mode DBSCAN où on fait confiance au mapping)
+        if algo != 'dbscan' and wall_mask[point_index]:
             return jsonify({'error': 'Point sur le mur, veuillez sélectionner une prise'}), 400
         
         # Vérifier que le point n'est pas déjà dans une prise isolée
@@ -1070,7 +1341,18 @@ def isolate_hold():
                 })
         
         # Expansion spatiale
-        cluster = expand_from_seed_api(pcd, point_index, plane_model, wall_mask)
+        cluster = []
+        
+        if algo == 'dbscan':
+            # Mode DBSCAN: Utiliser les clusters pré-calculés
+            if 'dbscan_map' in session and point_index in session['dbscan_map']:
+                cluster_idx = session['dbscan_map'][point_index]
+                cluster = session['dbscan_clusters'][cluster_idx]
+            else:
+                return jsonify({'error': 'Ce point ne fait pas partie d\'une prise détectée (bruit ou mur).'}), 400
+        else:
+            # Mode Manuel: Region Growing
+            cluster = expand_from_seed_api(pcd, point_index, plane_model, wall_mask)
         
         if len(cluster) < 10:
             return jsonify({'error': 'Prise trop petite (moins de 10 points)'}), 400
@@ -1095,10 +1377,75 @@ def isolate_hold():
         return jsonify({
             'success': True,
             'hold_id': hold_id,
-            'point_count': len(cluster),
+            'point_count': len(cluster), 
             'indices': cluster
         })
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/extract_all_holds', methods=['POST'])
+def extract_all_holds():
+    """
+    Isole automatiquement TOUTES les prises détectées par DBSCAN.
+    Reçoit: session_id
+    Retourne: liste des prises isolées (id, indices, point_count)
+    """
+    try:
+        data = request.get_json()
+        session_id = data.get('session_id')
         
+        if not session_id or session_id not in wall_sessions:
+            return jsonify({'error': 'Session invalide'}), 400
+            
+        session = wall_sessions[session_id]
+        pcd = session['pcd']
+        
+        # 1. Lancer DBSCAN (ou récupérer si déjà fait ?)
+        # Pour l'instant, on relance pour être sûr d'avoir les clusters propres
+        clusters_indices, _ = auto_isolate_dbscan_api(pcd)
+        
+        if not clusters_indices:
+             return jsonify({'success': True, 'count': 0, 'holds': []})
+
+        extracted_holds = []
+        
+        # 2. Convertir chaque cluster en prise isolée
+        for cluster in clusters_indices:
+            # Vérifier unicité (facultatif si on fait un reset violent avant)
+            # Ici on ajoute tout
+            
+            hold_id = len(session['isolated_holds'])
+            session['hold_indices'].append(set(cluster))
+            
+            # Créer le point cloud de la prise
+            points = np.asarray(pcd.points)[cluster]
+            colors = None
+            if pcd.has_colors():
+                colors = np.asarray(pcd.colors)[cluster]
+            
+            hold_pcd = o3d.geometry.PointCloud()
+            hold_pcd.points = o3d.utility.Vector3dVector(points)
+            if colors is not None:
+                hold_pcd.colors = o3d.utility.Vector3dVector(colors)
+            
+            session['isolated_holds'].append(hold_pcd)
+            
+            extracted_holds.append({
+                'hold_id': hold_id,
+                'indices': cluster,
+                'point_count': len(cluster)
+            })
+            
+        return jsonify({
+            'success': True,
+            'count': len(extracted_holds),
+            'holds': extracted_holds,
+            'message': f'{len(extracted_holds)} prises extraites automatiquement.'
+        })
+
     except Exception as e:
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
@@ -1120,17 +1467,34 @@ def match_isolated_holds():
         session = wall_sessions[session_id]
         isolated_holds = session['isolated_holds']
         
-        if len(isolated_holds) == 0:
-            return jsonify({'error': 'Aucune prise isolée'}), 400
+        # Support pour analyse par lot (progress bar)
+        hold_index = data.get('hold_index') # Optionnel
+        
+        target_holds = []
+        target_indices = []
+        
+        if hold_index is not None:
+            if 0 <= hold_index < len(isolated_holds):
+                target_holds = [isolated_holds[hold_index]]
+                target_indices = [hold_index]
+            else:
+                 return jsonify({'error': 'Index de prise invalide'}), 400
+        else:
+            target_holds = isolated_holds
+            target_indices = range(len(isolated_holds))
+
+        if len(target_holds) == 0:
+            return jsonify({'error': 'Aucune prise à analyser'}), 400
         
         all_results = []
         
-        for i, hold_pcd in enumerate(isolated_holds):
+        for i, hold_pcd in zip(target_indices, target_holds):
             print(f"\n[Matching] Prise {i+1}/{len(isolated_holds)}...")
             
             # Lancer le matcher
             matcher = HoldMatcherAPI(
                 hold_pcd,
+
                 eigen_threshold=0.1,
                 hue_threshold=60.0,
                 value_threshold=40.0,
@@ -1221,6 +1585,50 @@ def get_hold_matches():
             'matches': results
         })
         
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/auto_isolate', methods=['POST'])
+def auto_isolate():
+    """Endpoint pour l'isolation automatique (DBSCAN)."""
+    try:
+        data = request.get_json()
+        session_id = data.get('session_id')
+        
+        if not session_id or session_id not in wall_sessions:
+            return jsonify({'error': 'Session invalide'}), 400
+            
+        session = wall_sessions[session_id]
+        pcd = session['pcd']
+        
+        # Lancer l'algo
+        clusters_indices, candidate_indices = auto_isolate_dbscan_api(pcd)
+        
+        if not clusters_indices:
+            return jsonify({
+                'success': True,
+                'count': 0,
+                'candidate_indices': candidate_indices,
+                'message': 'Aucun cluster détecté. Essayez de changer les paramètres.'
+            })
+            
+        # Stocker les clusters pour le mode interactif
+        session['dbscan_clusters'] = clusters_indices
+        session['dbscan_map'] = {}  # point_index -> cluster_index_in_list
+        
+        for i, indices in enumerate(clusters_indices):
+            for idx in indices:
+                session['dbscan_map'][idx] = i
+                
+        return jsonify({
+            'success': True,
+            'count': len(clusters_indices),
+            'candidate_indices': candidate_indices,
+            'message': f'Mode DBSCAN activé : {len(clusters_indices)} clusters pré-calculés. Cliquez sur une prise pour la sélectionner.'
+        })
+
     except Exception as e:
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500

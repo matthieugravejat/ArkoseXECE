@@ -16,16 +16,20 @@
     <!-- Header avec Logo -->
     <header class="header">
         <div class="logo">
-            <span class="logo-icon">◇</span>
-            <span class="logo-text">HoldGen</span>
+            <img src="images/logo-arkose-noir-413x450.png" alt="Arkose Logo" class="logo-img">
         </div>
+        <div class="header-title">3D Arkose+</div>
+        <button class="about-btn" id="aboutBtn">
+            <span class="about-icon">?</span>
+            <span class="about-text">À propos</span>
+        </button>
     </header>
 
     <!-- Contenu Principal -->
     <main class="main-content">
         <!-- Titre de la section -->
         <div class="section-title">
-            <h1>Plan de la Salle</h1>
+            <h1>Plan de la Salle - NATION</h1>
             <p>Cliquez sur un mur pour télécharger un fichier</p>
         </div>
 
@@ -197,13 +201,13 @@
                             <line x1="12" y1="3" x2="12" y2="15" />
                         </svg>
                     </div>
-                    <p class="dropzone-text">Glissez-déposez votre fichier PLY de mur ici</p>
+                    <p class="dropzone-text">Glissez-déposez votre fichier GLB de mur ici</p>
                     <p class="dropzone-subtext">ou</p>
                     <label class="file-input-label">
                         Parcourir
-                        <input type="file" id="fileInput" class="file-input" accept=".ply">
+                        <input type="file" id="fileInput" class="file-input" accept=".ply,.glb">
                     </label>
-                    <p class="file-types">Format accepté: .ply uniquement</p>
+                    <p class="file-types">Formats acceptés: .glb</p>
                 </div>
             </div>
 
@@ -211,7 +215,7 @@
             <div class="preview-section" id="previewSection">
                 <div class="preview-header">
                     <div class="file-info-inline">
-                        <span class="file-icon-small">PLY</span>
+                        <span class="file-icon-small">GLB</span>
                         <span class="file-name" id="fileName">mur.ply</span>
                         <span class="file-size" id="fileSize">0 KB</span>
                     </div>
@@ -231,6 +235,28 @@
                     0 prise(s) sélectionnée(s)
                 </div>
 
+
+                <!-- Actions d'isolation -->
+                <div class="isolation-actions"
+                    style="margin-bottom: 10px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;">
+                    <button id="manualModeBtn"
+                        style="padding: 8px 16px; background: #d1fae5; color: #047857; border: none; border-radius: 6px; cursor: pointer; font-weight: 500; font-family: inherit; display: flex; align-items: center; gap: 6px; transition: background 0.2s;">
+                        <span>🖐️</span> Mode Manuel
+                    </button>
+                    <button id="autoDetectBtn"
+                        style="padding: 8px 16px; background: #e0e7ff; color: #4338ca; border: none; border-radius: 6px; cursor: pointer; font-weight: 500; font-family: inherit; display: flex; align-items: center; gap: 6px; transition: background 0.2s;">
+                        <span>✨</span> Mode Assistant (DBSCAN)
+                    </button>
+                    <button id="autoExtractAllBtn"
+                        style="padding: 8px 16px; background: #dbeafe; color: #1e40af; border: none; border-radius: 6px; cursor: pointer; font-weight: 500; font-family: inherit; display: flex; align-items: center; gap: 6px; transition: background 0.2s;">
+                        <span>⚡</span> Auto-Extraction Complète
+                    </button>
+                    <button id="clearSelectionBtn"
+                        style="padding: 8px 16px; background: #fee2e2; color: #b91c1c; border: none; border-radius: 6px; cursor: pointer; font-weight: 500; font-family: inherit; display: flex; align-items: center; gap: 6px; transition: background 0.2s;">
+                        <span>🗑️</span> Effacer tout
+                    </button>
+                </div>
+
                 <div class="preview-viewer" id="previewViewer">
                     <canvas id="previewCanvas"></canvas>
                     <div class="viewer-controls">
@@ -246,24 +272,19 @@
                     <span class="analyze-text">Identifier les prises sélectionnées</span>
                 </button>
 
-                <!-- Indicateur de chargement -->
+                <!-- Loading / Progress -->
                 <div class="loading-inline" id="loadingInline">
-                    <div class="loading-header">
-                        <div class="loading-spinner"></div>
-                        <span class="loading-text" id="loadingText">Analyse en cours...</span>
-                    </div>
+                    <div class="spinner"></div>
+                    <span id="loadingText">Analyse en cours...</span>
+                    <!-- Barre de progression -->
                     <div class="progress-container" id="progressContainer">
-                        <div class="progress-bar-wrapper">
-                            <div class="progress-bar-fill" id="progressBar"></div>
-                        </div>
-                        <div class="progress-info">
-                            <span class="progress-percent" id="progressPercent">0%</span>
-                            <span class="progress-detail" id="progressDetail">0 / 0 fichiers</span>
-                        </div>
-                        <div class="progress-current" id="progressCurrent"></div>
+                        <span class="progress-percent" id="progressPercent">0%</span>
+                        <span class="progress-detail" id="progressDetail">0 / 0 fichiers</span>
                     </div>
+                    <div class="progress-current" id="progressCurrent"></div>
                 </div>
             </div>
+        </div>
         </div>
 
         <!-- Zone de résultats avec visualisation 3D -->
@@ -288,9 +309,92 @@
         </div>
     </main>
 
+    <!-- Modal de Comparaison 3D -->
+    <div class="comparison-modal" id="comparisonModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>
+                    Comparaison 3D - Prise <span id="modalHoldNumber">1</span>
+                    <span class="modal-color-indicator" id="modalColorIndicator"></span>
+                </h2>
+                <button class="modal-close-btn" id="modalCloseBtn">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="viewer-grid">
+                    <!-- Zone PLY (mur avec zone sélectionnée) -->
+                    <div class="viewer-section">
+                        <h3>Mur avec Prises</h3>
+                        <div class="viewer-container" id="modalZonePLY"></div>
+                    </div>
+
+                    <!-- Mur GLB complet -->
+                    <div class="viewer-section">
+                        <h3>Mur Complet</h3>
+                        <div class="viewer-container" id="modalWallGLB"></div>
+                    </div>
+
+                    <!-- Prise matchée GLB avec navigation -->
+                    <div class="viewer-section">
+                        <h3>Résultat <span id="modalMatchRank">1</span>/3</h3>
+                        <div class="viewer-container" id="modalMatchGLB"></div>
+                        <div class="match-navigation">
+                            <button class="nav-btn" id="prevMatchBtn">←</button>
+                            <span class="match-info" id="matchInfo">Match 1</span>
+                            <button class="nav-btn" id="nextMatchBtn">→</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal À Propos -->
+    <div class="comparison-modal" id="aboutModal">
+        <div class="modal-content about-content">
+            <div class="modal-header">
+                <h2>À propos du projet</h2>
+                <button class="modal-close-btn" id="aboutCloseBtn">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="about-section">
+                    <h3>HoldGen - Automatisation de Matching de Prises</h3>
+                    <p>Ce projet s'inscrit dans le cadre du PFE (Projet de Fin d'Études) ECE Paris en collaboration avec
+                        Arkose. L'objectif est d'automatiser le scan et la reconnaissance de prises d'escalade.</p>
+                </div>
+
+                <div class="about-section">
+                    <h3>Comment ça marche ?</h3>
+                    <ol class="steps-list">
+                        <li>
+                            <strong>Scan & Extraction :</strong> Chargez un scan de mur 3D. Le système détecte
+                            automatiquement les prises.
+                        </li>
+                        <li>
+                            <strong>Isolation :</strong> Cliquez sur une prise pour l'isoler ou utilisez
+                            l'auto-extraction.
+                        </li>
+                        <li>
+                            <strong>Matching :</strong> L'algorithme compare la forme de la prise scannée avec notre
+                            base de données de modèles 3D.
+                        </li>
+                        <li>
+                            <strong>Résultats :</strong> Les meilleures correspondances sont affichées avec un score de
+                            confiance.
+                        </li>
+                    </ol>
+                </div>
+
+                <div class="about-section">
+                    <h3>Technologies</h3>
+                    <p>Open3D, Python, DBSCAN, ICP Registration, Three.js</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Footer -->
     <footer class="footer">
-        <p>© 2026 HoldGen - Duplication de Salles d'Escalade</p>
+        <p>© 2026 HoldGen - Duplication de Salles d'Escalade - PFE ECE Paris</p>
     </footer>
 
     <!-- Three.js pour la visualisation 3D -->

@@ -12,15 +12,22 @@ const API_URL = 'http://localhost:5001';
 let wallScene, wallCamera, wallRenderer, wallControls;
 let wallPointCloud = null;
 let wallAnimationId = null;
-let resultViewers = [];
+
+// Optimisation: Lazy loading des viewers 3D
+let activeViewers = new Map(); // {viewerId: {viewer, animationId, isPaused}}
+let viewerObserver = null; // Intersection Observer
 
 // État de l'application
 let currentSessionId = null;
-let wallCenter = [0, 0, 0];
+let wallCenter = { x: 0, y: 0, z: 0 };
 let isolatedHolds = [];  // {holdId, indices, color}
 let holdMatchResults = {};  // {holdId: [matches]}
+let resultViewers = [];
 let raycaster = null;
 let mouse = null;
+let isolationMode = 'manual'; // 'manual' ou 'dbscan'
+let dbscanPointCloud = null;
+let dbscanCandidateIndices = null; // Mapping: index local dans dbscanPointCloud -> index global session
 
 // Couleurs pour les prises isolées
 const HOLD_COLORS = [
@@ -63,10 +70,93 @@ document.addEventListener('DOMContentLoaded', () => {
     // Nouveaux éléments pour le mode mur
     const holdCountBadge = document.getElementById('holdCountBadge');
     const selectionInstructions = document.getElementById('selectionInstructions');
+    const autoDetectBtn = document.getElementById('autoDetectBtn');
+    const clearSelectionBtn = document.getElementById('clearSelectionBtn');
+
+    /**
+     * Lance l'extraction complète automatique
+     */
+    async function autoExtractAllHolds() {
+        if (!currentSessionId) {
+            alert("Veuillez d'abord charger un mur.");
+            return;
+        }
+
+        try {
+            showLoading('Extraction automatique de TOUTES les prises...');
+
+            const response = await fetch(`${API_URL}/api/extract_all_holds`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_id: currentSessionId })
+            });
+
+            const data = await response.json();
+            hideLoading();
+
+            if (!data.success) {
+                alert(data.message || 'Erreur lors de l\'extraction');
+                return;
+            }
+
+            if (data.count === 0) {
+                alert("Aucune prise détectée.");
+                return;
+            }
+
+            // Ajouter toutes les prises
+            data.holds.forEach((hold, index) => {
+                const holdColor = HOLD_COLORS[isolatedHolds.length % HOLD_COLORS.length];
+
+                isolatedHolds.push({
+                    holdId: hold.hold_id,
+                    indices: hold.indices,
+                    color: holdColor,
+                    pointCount: hold.point_count,
+                    matches: null
+                });
+
+                // Visualisation immédiate
+                // Note: highlightIsolatedHold met à jour dbscanPointCloud et wallPointCloud
+                // Si DBSCAN mode n'est pas actif, on voit wallPointCloud.
+                highlightIsolatedHold(hold.indices, holdColor);
+            });
+
+            updateHoldCountBadge();
+            alert(`${data.count} prises ont été extraites et ajoutées !`);
+
+        } catch (error) {
+            hideLoading();
+            console.error(error);
+            alert('Erreur: ' + error.message);
+        }
+    }
+
+    // --- Event Listeners ---
+    if (autoDetectBtn) {
+        autoDetectBtn.addEventListener('click', () => {
+            if (isolationMode === 'dbscan') {
+                deactivateDBSCANMode();
+            } else {
+                activateDBSCANMode();
+            }
+        });
+    }
+
+    // Bouton Auto-Extraction Complète
+    const autoExtractAllBtn = document.getElementById('autoExtractAllBtn');
+    if (autoExtractAllBtn) {
+        autoExtractAllBtn.addEventListener('click', autoExtractAllHolds);
+    }
+
+    if (clearSelectionBtn) {
+        clearSelectionBtn.addEventListener('click', clearIsolatedHolds);
+    }
 
     // État de l'application
     let selectedWall = null;
     let currentFile = null;
+    let currentGLBUrl = null; // Pour le modal de comparaison
 
     /**
      * Initialise le viewer Three.js pour le mur
@@ -143,18 +233,32 @@ document.addEventListener('DOMContentLoaded', () => {
      * Gestion du clic sur le mur pour sélectionner une prise
      */
     async function onWallClick(event) {
-        if (!wallPointCloud || !currentSessionId) return;
+        if (!currentSessionId) return;
+
+        // Choix du point cloud à raycaste (Mur normal OU Nuage DBSCAN)
+        let targetPointCloud = wallPointCloud;
+        if (isolationMode === 'dbscan' && dbscanPointCloud) {
+            targetPointCloud = dbscanPointCloud;
+        }
+
+        if (!targetPointCloud) return;
 
         const rect = previewCanvas.getBoundingClientRect();
         mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
         raycaster.setFromCamera(mouse, wallCamera);
-        const intersects = raycaster.intersectObject(wallPointCloud);
+        const intersects = raycaster.intersectObject(targetPointCloud);
 
         if (intersects.length > 0) {
-            const pointIndex = intersects[0].index;
-            console.log('Point cliqué:', pointIndex);
+            let pointIndex = intersects[0].index;
+
+            // Si mode DBSCAN, mapper vers l'index global
+            if (isolationMode === 'dbscan' && dbscanCandidateIndices) {
+                pointIndex = dbscanCandidateIndices[pointIndex];
+            }
+
+            console.log('Point cliqué:', pointIndex, '(Mode:', isolationMode, ')');
 
             await isolateHoldFromPoint(pointIndex);
         }
@@ -172,7 +276,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     session_id: currentSessionId,
-                    point_index: pointIndex
+                    point_index: pointIndex,
+                    algo: isolationMode
                 })
             });
 
@@ -214,20 +319,50 @@ document.addEventListener('DOMContentLoaded', () => {
      * Met en surbrillance une prise isolée
      */
     function highlightIsolatedHold(indices, color) {
-        if (!wallPointCloud) return;
+        // 1. Mise à jour du mur principal (toujours, pour qu'il soit à jour quand on le réaffiche)
+        if (wallPointCloud) {
+            const colors = wallPointCloud.geometry.attributes.color.array;
+            const r = ((color >> 16) & 255) / 255;
+            const g = ((color >> 8) & 255) / 255;
+            const b = (color & 255) / 255;
 
-        const colors = wallPointCloud.geometry.attributes.color.array;
-        const r = ((color >> 16) & 255) / 255;
-        const g = ((color >> 8) & 255) / 255;
-        const b = (color & 255) / 255;
+            indices.forEach(idx => {
+                colors[idx * 3] = r;
+                colors[idx * 3 + 1] = g;
+                colors[idx * 3 + 2] = b;
+            });
 
-        indices.forEach(idx => {
-            colors[idx * 3] = r;
-            colors[idx * 3 + 1] = g;
-            colors[idx * 3 + 2] = b;
-        });
+            wallPointCloud.geometry.attributes.color.needsUpdate = true;
+        }
 
-        wallPointCloud.geometry.attributes.color.needsUpdate = true;
+        // 2. Mise à jour du nuage DBSCAN (s'il est visible)
+        if (dbscanPointCloud && dbscanCandidateIndices) {
+            console.log("Mise à jour visualisation DBSCAN...");
+            const dbscanColors = dbscanPointCloud.geometry.attributes.color.array;
+            const r = ((color >> 16) & 255) / 255;
+            const g = ((color >> 8) & 255) / 255;
+            const b = (color & 255) / 255;
+
+            // Optimisation : créer un Set pour recherche rapide
+            const indicesSet = new Set(indices);
+            let matchCount = 0;
+
+            // Parcourir tous les candidats DBSCAN pour voir s'ils correspondent à la prise isolée
+            for (let localIdx = 0; localIdx < dbscanCandidateIndices.length; localIdx++) {
+                const globalIdx = dbscanCandidateIndices[localIdx];
+                if (indicesSet.has(globalIdx)) {
+                    dbscanColors[localIdx * 3] = r;
+                    dbscanColors[localIdx * 3 + 1] = g;
+                    dbscanColors[localIdx * 3 + 2] = b;
+                    matchCount++;
+                }
+            }
+            console.log(`Updated ${matchCount} points in DBSCAN cloud.`);
+
+            dbscanPointCloud.geometry.attributes.color.needsUpdate = true;
+        } else {
+            console.log("DBSCAN cloud not active or indices missing.");
+        }
     }
 
     /**
@@ -345,6 +480,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Créer le point cloud
         wallPointCloud = new THREE.Points(geometry, material);
+        wallPointCloud.userData.originalColors = new Float32Array(colorArray); // Sauvegarder couleurs originales
         wallScene.add(wallPointCloud);
 
         // Positionner la caméra
@@ -355,157 +491,199 @@ document.addEventListener('DOMContentLoaded', () => {
         wallControls.update();
     }
 
-    /**
-     * Lance le matching pour toutes les prises isolées
-     */
-    async function matchAllIsolatedHolds() {
-        if (isolatedHolds.length === 0) {
-            alert('Veuillez d\'abord sélectionner des prises sur le mur');
+    async function analyzeHolds() {
+        if (!currentSessionId || isolatedHolds.length === 0) {
+            alert("Aucune prise sélectionnée à analyser.");
             return;
         }
 
-        showLoading('Matching des prises...');
-
         try {
-            const response = await fetch(`${API_URL}/api/match_isolated_holds`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    session_id: currentSessionId
-                })
-            });
+            // Initialisation UI Loading
+            showLoading('Analyse détaillée en cours...');
+            if (progressContainer) progressContainer.style.display = 'block';
+            if (progressBar) progressBar.style.width = '0%';
+            if (progressPercent) progressPercent.textContent = '0%';
+            if (progressDetail) progressDetail.textContent = `0 / ${isolatedHolds.length} prises`;
 
-            const data = await response.json();
-            hideLoading();
+            // Reset des résultats
+            holdMatchResults = {};
+            cleanupResultViewers();
+            resultsGrid.innerHTML = ''; // On vide la grille
+            resultsContainer.classList.add('visible'); // On affiche le conteneur vide
 
-            if (!data.success) {
-                throw new Error(data.error || 'Erreur inconnue');
-            }
+            // Info source initiale
+            sourceInfo.innerHTML = `
+                <div class="source-info-item">
+                    <span class="source-info-label">Prises analysées:</span>
+                    <span class="source-info-value" id="analyzedCount">0</span> / <span class="source-info-value">${isolatedHolds.length}</span>
+                </div>
+                <div class="source-info-item">
+                    <span class="source-info-label">Mur:</span>
+                    <span class="source-info-value">${selectedWall?.dataset.name || 'Non spécifié'}</span>
+                </div>
+            `;
 
-            console.log('Résultats matching:', data);
+            // Boucle séquentielle pour la barre de progression
+            for (let i = 0; i < isolatedHolds.length; i++) {
+                const hold = isolatedHolds[i];
 
-            // Stocker les résultats
-            data.results.forEach((result, i) => {
-                holdMatchResults[result.hold_info.hold_id] = result;
-                if (isolatedHolds[i]) {
+                // Update UI avant l'appel
+                const percent = Math.round((i / isolatedHolds.length) * 100);
+                if (progressBar) progressBar.style.width = `${percent}%`;
+                if (progressPercent) progressPercent.textContent = `${percent}%`;
+                if (progressDetail) progressDetail.textContent = `Analyse prise ${i + 1} / ${isolatedHolds.length}`;
+
+                // Appel API pour UNE prise
+                const response = await fetch(`${API_URL}/api/match_isolated_holds`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        session_id: currentSessionId,
+                        hold_index: i // On demande juste cet index
+                    })
+                });
+
+                const data = await response.json();
+
+                if (!data.success) {
+                    console.error(`Erreur matching prise ${i}:`, data.error);
+                    continue; // On continue avec les autres
+                }
+
+                // Traitement du résultat (liste de 1 élément normally)
+                if (data.results && data.results.length > 0) {
+                    const result = data.results[0];
+                    holdMatchResults[result.hold_info.hold_id] = result;
                     isolatedHolds[i].matches = result.matches;
                     isolatedHolds[i].color_name = result.hold_info.color_name;
-                }
-            });
 
-            // Afficher les résultats
-            showMatchResults(data.results);
+                    // Ajout progressif à l'affichage
+                    appendMatchResult(result, i);
+                }
+
+                // Update compteur
+                const countElem = document.getElementById('analyzedCount');
+                if (countElem) countElem.textContent = i + 1;
+            }
+
+            // Fin
+            if (progressBar) progressBar.style.width = '100%';
+            if (progressPercent) progressPercent.textContent = '100%';
+            if (progressDetail) progressDetail.textContent = 'Terminé !';
+
+            setTimeout(() => {
+                hideLoading();
+                if (progressContainer) progressContainer.style.display = 'none';
+            }, 500);
+
+            resultsContainer.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
         } catch (error) {
             hideLoading();
+            if (progressContainer) progressContainer.style.display = 'none';
             console.error('Erreur matching:', error);
             alert('Erreur: ' + error.message);
         }
     }
 
     /**
-     * Affiche les résultats du matching
+     * Ajoute UN résultat à la grille (pour l'affichage progressif)
      */
-    function showMatchResults(results) {
-        cleanupResultViewers();
+    function appendMatchResult(result, index) {
+        const hold = isolatedHolds[index];
+        const colorHex = hold ? '#' + hold.color.toString(16).padStart(6, '0') : '#ff0000';
+        const matches = result.matches || [];
 
-        // GARDER le mur visible - ne pas cacher dropzoneContainer
-        // dropzoneContainer.classList.remove('visible');
-
-        // Info source (sans emojis)
-        sourceInfo.innerHTML = `
-            <div class="source-info-item">
-                <span class="source-info-label">Prises analysées:</span>
-                <span class="source-info-value">${results.length}</span>
-            </div>
-            <div class="source-info-item">
-                <span class="source-info-label">Mur:</span>
-                <span class="source-info-value">${selectedWall?.dataset.name || 'Non spécifié'}</span>
-            </div>
-        `;
-
-        // Créer les cartes de résultats EN LIGNE (horizontal)
-        if (results.length > 0) {
-            resultsGrid.innerHTML = results.map((result, index) => {
-                const hold = isolatedHolds[index];
-                const colorHex = hold ? '#' + hold.color.toString(16).padStart(6, '0') : '#ff0000';
-                const matches = result.matches || [];
-
-                return `
-                    <div class="hold-result-row" data-hold-id="${result.hold_info.hold_id}">
-                        <div class="hold-label" style="background: ${colorHex}">
-                            <span class="hold-number">Prise ${index + 1}</span>
-                            <span class="hold-meta">${result.hold_info.point_count} pts${result.hold_info.color_name ? ' • ' + result.hold_info.color_name : ''}</span>
-                        </div>
-                        <div class="matches-row">
-                            ${matches.length > 0 ? matches.slice(0, 3).map((match, mi) => `
-                                <div class="result-card rank-${mi + 1}">
-                                    <div class="result-rank">${mi + 1}</div>
-                                    <div class="result-viewer" id="matchViewer${index}_${mi}"></div>
-                                    <div class="result-name">${match.name}</div>
-                                    <div class="result-score">
-                                        <div class="score-value">${match.score}%</div>
-                                        <div class="score-label">Score de correspondance</div>
+        const html = `
+            <div class="hold-result-row" data-hold-id="${result.hold_info.hold_id}">
+                <div class="hold-label" style="background: ${colorHex}">
+                    <span class="hold-number">Prise ${index + 1}</span>
+                    <button class="hold-meta" onclick="openComparisonModal(${index})" title="Comparer en 3D">➕</button>
+                </div>
+                <div class="matches-row">
+                    ${matches.length > 0 ? matches.slice(0, 3).map((match, mi) => `
+                        <div class="result-card rank-${mi + 1}">
+                            <div class="result-rank">${mi + 1}</div>
+                            <div class="result-viewer" id="matchViewer${index}_${mi}"></div>
+                            <div class="result-name">${match.name}</div>
+                            <div class="result-score">
+                                <div class="score-value">${match.score}%</div>
+                                <div class="score-label">Score de correspondance</div>
+                            </div>
+                            <div class="result-details">
+                                <div class="detail-item">
+                                    <div class="detail-label-container">
+                                        <span class="detail-label">Précision</span>
+                                        <span class="info-icon" data-tooltip="% de superposition entre le scan et le modèle">ℹ︎</span>
                                     </div>
-                                    <div class="result-details">
-                                        <div class="detail-item">
-                                            <span class="detail-label">ICP</span>
-                                            <span class="detail-value">${match.icp_fitness}%</span>
-                                        </div>
-                                        <div class="detail-item">
-                                            <span class="detail-label">Eigen</span>
-                                            <span class="detail-value">${match.eigen_score}%</span>
-                                        </div>
-                                        <div class="detail-item">
-                                            <span class="detail-label">RMSE</span>
-                                            <span class="detail-value">${match.rmse_mm}mm</span>
-                                        </div>
-                                        <div class="detail-item">
-                                            <span class="detail-label">Échelle</span>
-                                            <span class="detail-value">${match.scale}×</span>
-                                        </div>
-                                    </div>
+                                    <span class="detail-value">${match.icp_fitness}%</span>
                                 </div>
-                            `).join('') : '<div class="no-match">Aucune correspondance trouvée</div>'}
+                                <div class="detail-item">
+                                    <div class="detail-label-container">
+                                        <span class="detail-label">Forme</span>
+                                        <span class="info-icon" data-tooltip="Similitude de la courbure et géométrie">ℹ︎</span>
+                                    </div>
+                                    <span class="detail-value">${match.eigen_score}%</span>
+                                </div>
+                                <div class="detail-item">
+                                    <div class="detail-label-container">
+                                        <span class="detail-label">Distance</span>
+                                        <span class="info-icon" data-tooltip="Écart moyen en mm entre les points">ℹ︎</span>
+                                    </div>
+                                    <span class="detail-value">${match.rmse_mm}mm</span>
+                                </div>
+                                <div class="detail-item">
+                                    <div class="detail-label-container">
+                                        <span class="detail-label">Taille</span>
+                                        <span class="info-icon" data-tooltip="Facteur d'échelle (1.0 = taille réelle)">ℹ︎</span>
+                                    </div>
+                                    <span class="detail-value">${match.scale}×</span>
+                                </div>
+                            </div>
                         </div>
-                    </div>
-                `;
-            }).join('');
+                    `).join('') : '<div class="no-match">Aucune correspondance trouvée</div>'}
+                </div>
+            </div >
+            `;
 
-            noResults.classList.remove('visible');
+        // Insertion HTML
+        resultsGrid.insertAdjacentHTML('beforeend', html);
 
-            // Créer les viewers 3D pour chaque match
-            setTimeout(() => {
-                results.forEach((result, index) => {
-                    const matches = result.matches || [];
-                    matches.slice(0, 3).forEach((match, mi) => {
-                        if (match.glb_url) {
-                            const viewer = createResultViewer(`matchViewer${index}_${mi}`, `${API_URL}${match.glb_url}`, true);
-                            if (viewer) resultViewers.push(viewer);
-                        } else if (match.ply_url) {
-                            const viewer = createResultViewer(`matchViewer${index}_${mi}`, `${API_URL}${match.ply_url}`, false);
-                            if (viewer) resultViewers.push(viewer);
-                        }
-                    });
-                });
-            }, 100);
-
-        } else {
-            resultsGrid.innerHTML = '';
-            noResults.classList.add('visible');
-        }
-
-        resultsContainer.classList.add('visible');
+        // Lazy loading: créer des placeholders au lieu des viewers immédiats
         setTimeout(() => {
-            resultsContainer.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            matches.slice(0, 3).forEach((match, mi) => {
+                const viewerId = `matchViewer${index}_${mi}`;
+                const container = document.getElementById(viewerId);
+
+                if (container && (match.glb_url || match.ply_url)) {
+                    const modelUrl = match.glb_url ? `${API_URL}${match.glb_url}` : `${API_URL}${match.ply_url}`;
+                    const isGLB = !!match.glb_url;
+
+                    // Ajouter les data attributes pour lazy loading
+                    container.dataset.viewerId = viewerId;
+                    container.dataset.modelUrl = modelUrl;
+                    container.dataset.isGlb = isGLB;
+
+                    // Observer le container
+                    if (viewerObserver) {
+                        viewerObserver.observe(container);
+                    }
+                }
+            });
         }, 100);
+
+        noResults.classList.remove('visible');
+    }
+
+    // Ancienne fonction showMatchResults (gardée pour compatibilité ou reset, mais vidée)
+    function showMatchResults(results) {
+        // Obsolète avec l'affichage progressif, mais peut servir de structure
     }
 
     /**
-     * Crée un viewer 3D pour un résultat
+     * Crée un viewer 3D optimisé pour lazy loading
      */
-    function createResultViewer(containerId, modelUrl, isGLB = false) {
-        const container = document.getElementById(containerId);
+    function createResultViewerOptimized(container, modelUrl, isGLB = false) {
         if (!container) return null;
 
         const width = container.clientWidth || 150;
@@ -586,6 +764,120 @@ document.addEventListener('DOMContentLoaded', () => {
             if (viewer.renderer) viewer.renderer.dispose();
         });
         resultViewers = [];
+        activeViewers.clear();
+    }
+
+    /**
+     * Initialise l'Intersection Observer pour le lazy loading
+     */
+    function initViewerObserver() {
+        if (viewerObserver) return;
+
+        viewerObserver = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                const viewerId = entry.target.dataset.viewerId;
+                if (!viewerId) return;
+
+                if (entry.isIntersecting) {
+                    // Viewer visible: créer ou reprendre l'animation
+                    const viewerData = activeViewers.get(viewerId);
+                    if (viewerData && viewerData.isPaused) {
+                        resumeViewer(viewerId);
+                    } else if (!viewerData) {
+                        // Créer le viewer lazy
+                        createLazyViewer(entry.target);
+                    }
+                } else {
+                    // Viewer invisible: mettre en pause
+                    pauseViewer(viewerId);
+                }
+            });
+        }, {
+            threshold: 0.1, // 10% visible
+            rootMargin: '50px' // Charger un peu avant d'être visible
+        });
+    }
+
+    /**
+     * Met en pause un viewer
+     */
+    function pauseViewer(viewerId) {
+        const viewerData = activeViewers.get(viewerId);
+        if (!viewerData || viewerData.isPaused) return;
+
+        if (viewerData.animationId) {
+            cancelAnimationFrame(viewerData.animationId);
+            viewerData.animationId = null;
+        }
+        viewerData.isPaused = true;
+    }
+
+    /**
+     * Reprend l'animation d'un viewer
+     */
+    function resumeViewer(viewerId) {
+        const viewerData = activeViewers.get(viewerId);
+        if (!viewerData || !viewerData.isPaused) return;
+
+        const { viewer } = viewerData;
+
+        function animate() {
+            const animId = requestAnimationFrame(animate);
+            viewerData.animationId = animId;
+            if (viewer.controls) viewer.controls.update();
+            if (viewer.renderer && viewer.scene && viewer.camera) {
+                viewer.renderer.render(viewer.scene, viewer.camera);
+            }
+        }
+
+        viewerData.isPaused = false;
+        animate();
+    }
+
+    /**
+     * Met en pause tous les viewers (pour le modal)
+     */
+    function pauseAllViewers() {
+        activeViewers.forEach((viewerData, viewerId) => {
+            pauseViewer(viewerId);
+        });
+    }
+
+    /**
+     * Reprend tous les viewers visibles
+     */
+    function resumeAllViewers() {
+        // Ne reprendre que les viewers visibles dans le viewport
+        activeViewers.forEach((viewerData, viewerId) => {
+            const container = document.querySelector(`[data-viewer-id="${viewerId}"]`);
+            if (container) {
+                const rect = container.getBoundingClientRect();
+                const isVisible = rect.top < window.innerHeight && rect.bottom > 0;
+                if (isVisible && viewerData.isPaused) {
+                    resumeViewer(viewerId);
+                }
+            }
+        });
+    }
+
+    /**
+     * Crée un viewer lazy à partir d'un container
+     */
+    function createLazyViewer(container) {
+        const viewerId = container.dataset.viewerId;
+        const modelUrl = container.dataset.modelUrl;
+        const isGLB = container.dataset.isGlb === 'true';
+
+        if (!modelUrl || activeViewers.has(viewerId)) return;
+
+        const viewer = createResultViewerOptimized(container, modelUrl, isGLB);
+        if (viewer) {
+            activeViewers.set(viewerId, {
+                viewer: viewer,
+                animationId: viewer.animId,
+                isPaused: false
+            });
+        }
     }
 
     /**
@@ -670,6 +962,8 @@ document.addEventListener('DOMContentLoaded', () => {
             }).catch(console.error);
             currentSessionId = null;
         }
+
+        deactivateDBSCANMode();
     }
 
     /**
@@ -684,6 +978,61 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     /**
+     * Convertit un fichier GLB en PLY et le charge
+     */
+    async function convertAndLoadGLB(file) {
+        console.log('🔄 Conversion GLB vers PLY:', file.name);
+
+        const formData = new FormData();
+        formData.append('file', file);
+
+        try {
+            showLoading('Conversion du GLB en PLY avec couleurs...');
+
+            const response = await fetch(`${API_URL}/api/convert_glb`, {
+                method: 'POST',
+                body: formData
+            });
+
+            const data = await response.json();
+
+            if (!data.success) {
+                throw new Error(data.error || 'Erreur de conversion');
+            }
+
+            hideLoading();
+            console.log('✅ GLB converti:', data.total_points, 'points');
+            console.log('   Plan détecté:', data.wall_points, 'points sur le mur');
+            console.log('   Message:', data.message);
+
+            // Sauvegarder la session (comme dans loadWallPLY)
+            currentSessionId = data.session_id;
+            wallCenter = data.center;
+            isolatedHolds = [];
+            holdMatchResults = {};
+
+            // Sauvegarder l'URL du GLB pour le modal
+            currentGLBUrl = URL.createObjectURL(file);
+
+            // Afficher le point cloud converti
+            displayWallPointCloud(data);
+
+            // Afficher les instructions
+            if (selectionInstructions) {
+                selectionInstructions.style.display = 'block';
+            }
+
+            // Forcer le resize
+            setTimeout(resizeWallViewer, 100);
+
+        } catch (error) {
+            hideLoading();
+            console.error('❌ Erreur conversion:', error);
+            alert('Erreur lors de la conversion du GLB.\\n' + error.message);
+        }
+    }
+
+    /**
      * Gère le fichier uploadé
      */
     function handleFile(file) {
@@ -691,8 +1040,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const fileExtension = '.' + file.name.split('.').pop().toLowerCase();
 
-        if (fileExtension !== '.ply') {
-            alert('Format de fichier non supporté. Seuls les fichiers .ply sont acceptés.');
+        if (fileExtension !== '.ply' && fileExtension !== '.glb') {
+            alert('Format de fichier non supporté. Seuls les fichiers .ply et .glb sont acceptés.');
             return;
         }
 
@@ -705,8 +1054,13 @@ document.addEventListener('DOMContentLoaded', () => {
         previewSection.classList.add('visible');
         dropzoneContainer.classList.add('has-preview');
 
-        // Charger le mur
-        loadWallPLY(file);
+        // Si c'est un GLB, le convertir d'abord en PLY
+        if (fileExtension === '.glb') {
+            convertAndLoadGLB(file);
+        } else {
+            // Charger le mur directement
+            loadWallPLY(file);
+        }
     }
 
     // Éléments de progression
@@ -740,14 +1094,166 @@ document.addEventListener('DOMContentLoaded', () => {
         resultsContainer.classList.remove('visible');
         noResults.classList.remove('visible');
         cleanupResultViewers();
-        resetDropzone();
+        // Ne pas resetDropzone ici, sinon on perd le mur
+        // resetDropzone(); 
 
-        window.scrollTo({ top: 0, behavior: 'smooth' });
+        // Juste vider les résultats, garder les prises isolées
+        holdMatchResults = {};
+    }
 
-        if (selectedWall) {
-            selectedWall.classList.remove('selected');
-            selectedWall = null;
+    /**
+     * Active le mode DBSCAN (calcul des clusters)
+     */
+    async function activateDBSCANMode() {
+        if (!currentSessionId) {
+            alert("Veuillez d'abord charger un mur.");
+            return;
         }
+
+        try {
+            showLoading('Activation Mode DBSCAN...');
+
+            const response = await fetch(`${API_URL}/api/auto_isolate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_id: currentSessionId })
+            });
+
+            const data = await response.json();
+            hideLoading();
+
+            if (!data.success) {
+                alert(data.message || 'Erreur inconnue');
+                return;
+            }
+
+            if (data.count === 0) {
+                alert("Aucun cluster détecté avec les paramètres actuels.");
+                return;
+            }
+
+            // Activation du mode
+            isolationMode = 'dbscan';
+
+            // === VISUALISATION SANS MUR ===
+            // Créer un nuage temporaire avec SEULEMENT les candidats
+            if (data.candidate_indices && wallPointCloud) {
+                const candidates = data.candidate_indices;
+                dbscanCandidateIndices = candidates; // Stocker map
+
+                // Extraire les positions/couleurs du mur original
+                const originalPos = wallPointCloud.geometry.attributes.position.array;
+                const originalCol = wallPointCloud.userData.originalColors || wallPointCloud.geometry.attributes.color.array;
+
+                const newPos = new Float32Array(candidates.length * 3);
+                const newCol = new Float32Array(candidates.length * 3);
+
+                for (let i = 0; i < candidates.length; i++) {
+                    const idx = candidates[i];
+
+                    newPos[i * 3] = originalPos[idx * 3];
+                    newPos[i * 3 + 1] = originalPos[idx * 3 + 1];
+                    newPos[i * 3 + 2] = originalPos[idx * 3 + 2];
+
+                    newCol[i * 3] = originalCol[idx * 3];
+                    newCol[i * 3 + 1] = originalCol[idx * 3 + 1];
+                    newCol[i * 3 + 2] = originalCol[idx * 3 + 2];
+                }
+
+                const geo = new THREE.BufferGeometry();
+                geo.setAttribute('position', new THREE.BufferAttribute(newPos, 3));
+                geo.setAttribute('color', new THREE.BufferAttribute(newCol, 3));
+                geo.computeBoundingBox();
+
+                const mat = new THREE.PointsMaterial({
+                    size: wallPointCloud.material.size,
+                    vertexColors: true,
+                    sizeAttenuation: true
+                });
+
+                dbscanPointCloud = new THREE.Points(geo, mat);
+                wallScene.add(dbscanPointCloud);
+
+                // Cacher le mur original
+                wallPointCloud.visible = false;
+            }
+
+            // Feedback visuel sur le bouton
+            if (autoDetectBtn) {
+                autoDetectBtn.style.background = "#d1fae5";
+                autoDetectBtn.style.color = "#047857";
+                autoDetectBtn.innerHTML = "<span>✅</span> Mode DBSCAN Actif";
+            }
+
+            alert(`${data.count} clusters identifiés.\nLe mur a été masqué pour faciliter la sélection.`);
+
+        } catch (error) {
+            hideLoading();
+            console.error(error);
+            alert('Erreur: ' + error.message);
+        }
+    }
+
+    function deactivateDBSCANMode() {
+        isolationMode = 'manual';
+
+        // Restaurer bouton
+        if (autoDetectBtn) {
+            autoDetectBtn.style.background = "#e0e7ff";
+            autoDetectBtn.style.color = "#4338ca";
+            autoDetectBtn.innerHTML = "<span>✨</span> Mode Assistant (DBSCAN)";
+        }
+
+        // Supprimer nuage DBSCAN
+        if (dbscanPointCloud) {
+            wallScene.remove(dbscanPointCloud);
+            dbscanPointCloud.geometry.dispose();
+            dbscanPointCloud.material.dispose();
+            dbscanPointCloud = null;
+        }
+        dbscanCandidateIndices = null;
+
+        // Réafficher mur
+        if (wallPointCloud) {
+            wallPointCloud.visible = true;
+        }
+    }
+
+    /**
+     * Efface toutes les sélections
+     */
+    function clearIsolatedHolds() {
+        if (!wallPointCloud || isolatedHolds.length === 0) return;
+
+        if (!confirm("Voulez-vous vraiment effacer toutes les sélections ?")) return;
+
+        // Vider la liste
+        isolatedHolds = [];
+        updateHoldCountBadge();
+
+        // Restaurer couleurs
+        if (wallPointCloud.userData.originalColors) {
+            const colors = wallPointCloud.geometry.attributes.color.array;
+            const original = wallPointCloud.userData.originalColors;
+            for (let i = 0; i < original.length; i++) {
+                colors[i] = original[i];
+            }
+            wallPointCloud.geometry.attributes.color.needsUpdate = true;
+        }
+
+        // Nettoyer côté serveur aussi ? 
+        // Pas strictement nécessaire car on enverra les nouveaux IDs, 
+        // mais pour être propre on pourrait vider la session['isolated_holds'].
+        // Comme l'API est stateless pour les IDs (on renvoie tout ou on isole un par un),
+        // Le endpoint `isolate_hold` ajoute à une liste.
+        // Le endpoint `auto_isolate` ajoute aussi.
+        // Si on vide le client, le serveur a toujours les anciennes prises dans sa liste `isolated_holds`.
+        // Ce n'est pas grave tant qu'on ne demande pas de matcher des IDs qui n'existent plus pour le client.
+        // MAIS si on ré-ajoute, les IDs vont continuer d'augmenter côté serveur (0, 1, 2... puis 10, 11...).
+        // Pour être propre, on devrait appeler un endpoint reset_holds.
+        // Mais bon, `clear_session` vide tout (y compris le mur).
+        // Reset mode
+        deactivateDBSCANMode();
     }
 
     // ===== Event Listeners =====
@@ -789,7 +1295,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // Bouton d'analyse = lancer le matching
-    analyzeBtn.addEventListener('click', matchAllIsolatedHolds);
+    analyzeBtn.addEventListener('click', analyzeHolds);
     newAnalysisBtn.addEventListener('click', resetForNewAnalysis);
 
     document.addEventListener('keydown', (e) => {
@@ -801,6 +1307,311 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
     });
+
+    // ===== Comparison Modal =====
+    const comparisonModal = document.getElementById('comparisonModal');
+    const modalCloseBtn = document.getElementById('modalCloseBtn');
+    const prevMatchBtn = document.getElementById('prevMatchBtn');
+    const nextMatchBtn = document.getElementById('nextMatchBtn');
+
+    let currentModalHoldIndex = 0;
+    let currentMatchIndex = 0;
+    let modalViewers = { zone: null, wall: null, match: null };
+    let syncedControls = [];
+
+    window.openComparisonModal = function (holdIndex) {
+        currentModalHoldIndex = holdIndex;
+        currentMatchIndex = 0;
+
+        const hold = isolatedHolds[holdIndex];
+        if (!hold || !hold.matches || hold.matches.length === 0) {
+            alert("Aucun résultat disponible pour cette prise.");
+            return;
+        }
+
+        // Update header
+        document.getElementById('modalHoldNumber').textContent = holdIndex + 1;
+
+        // Update color indicator
+        const colorIndicator = document.getElementById('modalColorIndicator');
+        if (colorIndicator && hold.color !== undefined) {
+            // hold.color est un nombre hexadécimal (ex: 0xff0000)
+            const r = (hold.color >> 16) & 0xFF;
+            const g = (hold.color >> 8) & 0xFF;
+            const b = hold.color & 0xFF;
+            const hexColor = `rgb(${r}, ${g}, ${b})`;
+            colorIndicator.style.backgroundColor = hexColor;
+        }
+
+        // Show modal
+        comparisonModal.classList.add('visible');
+
+        // Pause tous les viewers en arrière-plan
+        pauseAllViewers();
+
+        // Initialize viewers
+        setTimeout(() => {
+            cleanupModalViewers();
+            initializeModalViewers(holdIndex);
+        }, 100);
+    };
+
+    function cleanupModalViewers() {
+        Object.values(modalViewers).forEach(viewer => {
+            if (viewer && viewer.renderer) {
+                viewer.renderer.dispose();
+                viewer.renderer.forceContextLoss();
+            }
+        });
+        modalViewers = { zone: null, wall: null, match: null };
+        syncedControls = [];
+    }
+
+    function initializeModalViewers(holdIndex) {
+        const hold = isolatedHolds[holdIndex];
+
+        // 1. Wall PLY with colored holds (clone from main viewer)
+        if (wallPointCloud) {
+            modalViewers.zone = cloneWallToModal('modalZonePLY');
+        }
+
+        // 2. Wall GLB (complete wall)
+        if (currentGLBUrl) {
+            modalViewers.wall = createModalViewer('modalWallGLB', currentGLBUrl, true);
+        }
+
+        // 3. Match GLB (first match)
+        loadMatchInModal(0);
+
+        // Note: Synchronisation désactivée pour éviter les bugs de mouvement
+        // Chaque viewer peut maintenant être manipulé indépendamment
+    }
+
+    function cloneWallToModal(containerId) {
+        const container = document.getElementById(containerId);
+        if (!container || !wallPointCloud) return null;
+
+        // Clear container
+        container.innerHTML = '';
+
+        const width = container.clientWidth;
+        const height = container.clientHeight;
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xf5f5f5);
+
+        const camera = new THREE.PerspectiveCamera(60, width / height, 0.01, 1000);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(width, height);
+        container.appendChild(renderer.domElement);
+
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(1, 1, 1);
+        scene.add(directionalLight);
+
+        // Clone the wall point cloud
+        const clonedGeometry = wallPointCloud.geometry.clone();
+        const clonedMaterial = wallPointCloud.material.clone();
+        const clonedMesh = new THREE.Points(clonedGeometry, clonedMaterial);
+        scene.add(clonedMesh);
+
+        // Set camera position
+        clonedGeometry.computeBoundingBox();
+        const center = clonedGeometry.boundingBox.getCenter(new THREE.Vector3());
+        const size = clonedGeometry.boundingBox.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z);
+        camera.position.set(center.x, center.y, center.z + maxDim * 1.5);
+        controls.target.copy(center);
+        controls.update();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        return { scene, camera, renderer, controls };
+    }
+
+    function createModalViewer(containerId, modelUrl, isGLB) {
+        const container = document.getElementById(containerId);
+        if (!container) return null;
+
+        // Clear container
+        container.innerHTML = '';
+
+        const width = container.clientWidth;
+        const height = container.clientHeight;
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xf5f5f5);
+
+        const camera = new THREE.PerspectiveCamera(60, width / height, 0.01, 1000);
+        camera.position.set(0, 0, 0.3);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(width, height);
+        container.appendChild(renderer.domElement);
+
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(1, 1, 1);
+        scene.add(directionalLight);
+
+        // Load model
+        if (isGLB) {
+            const loader = new THREE.GLTFLoader();
+            loader.load(modelUrl, (gltf) => {
+                scene.add(gltf.scene);
+                const box = new THREE.Box3().setFromObject(gltf.scene);
+                const center = box.getCenter(new THREE.Vector3());
+                const size = box.getSize(new THREE.Vector3());
+                const maxDim = Math.max(size.x, size.y, size.z);
+                camera.position.set(center.x, center.y, center.z + maxDim * 1.5);
+                controls.target.copy(center);
+                controls.update();
+            });
+        } else {
+            const loader = new THREE.PLYLoader();
+            loader.load(modelUrl, (geometry) => {
+                geometry.computeVertexNormals();
+                const material = new THREE.PointsMaterial({ size: 0.002, vertexColors: true });
+                const mesh = new THREE.Points(geometry, material);
+                scene.add(mesh);
+                geometry.computeBoundingBox();
+                const center = geometry.boundingBox.getCenter(new THREE.Vector3());
+                const size = geometry.boundingBox.getSize(new THREE.Vector3());
+                const maxDim = Math.max(size.x, size.y, size.z);
+                camera.position.set(center.x, center.y, center.z + maxDim * 1.5);
+                controls.target.copy(center);
+                controls.update();
+            });
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        return { scene, camera, renderer, controls };
+    }
+
+    function setupSynchronizedControls() {
+        // Include all three viewers in synchronization
+        syncedControls = [
+            modalViewers.zone?.controls,
+            modalViewers.wall?.controls,
+            modalViewers.match?.controls
+        ].filter(c => c);
+
+        syncedControls.forEach((controls, index) => {
+            if (controls) {
+                controls.addEventListener('change', () => {
+                    // Get the rotation from the current control
+                    const rotation = controls.object.rotation.clone();
+
+                    // Apply to all other controls
+                    syncedControls.forEach((otherControls, otherIndex) => {
+                        if (otherControls && otherIndex !== index) {
+                            otherControls.object.rotation.copy(rotation);
+                            otherControls.update();
+                        }
+                    });
+                });
+            }
+        });
+    }
+
+    function loadMatchInModal(matchIndex) {
+        const hold = isolatedHolds[currentModalHoldIndex];
+        const matches = hold.matches || [];
+
+        if (matchIndex < 0 || matchIndex >= matches.length) return;
+
+        currentMatchIndex = matchIndex;
+        const match = matches[matchIndex];
+
+        // Update UI
+        document.getElementById('modalMatchRank').textContent = matchIndex + 1;
+        document.getElementById('matchInfo').textContent = match.name;
+
+        // Update navigation buttons
+        prevMatchBtn.disabled = matchIndex === 0;
+        nextMatchBtn.disabled = matchIndex === matches.length - 1;
+
+        // Load match GLB
+        if (modalViewers.match && modalViewers.match.renderer) {
+            modalViewers.match.renderer.dispose();
+        }
+
+        const matchUrl = match.glb_url ? `${API_URL}${match.glb_url}` : (match.ply_url ? `${API_URL}${match.ply_url}` : null);
+        if (matchUrl) {
+            modalViewers.match = createModalViewer('modalMatchGLB', matchUrl, match.glb_url ? true : false);
+        }
+    }
+
+    modalCloseBtn.addEventListener('click', () => {
+        comparisonModal.classList.remove('visible');
+        cleanupModalViewers();
+
+        // Reprendre les viewers visibles en arrière-plan
+        resumeAllViewers();
+    });
+
+    prevMatchBtn.addEventListener('click', () => {
+        if (currentMatchIndex > 0) {
+            loadMatchInModal(currentMatchIndex - 1);
+        }
+    });
+
+    nextMatchBtn.addEventListener('click', () => {
+        const hold = isolatedHolds[currentModalHoldIndex];
+        if (hold && hold.matches && currentMatchIndex < hold.matches.length - 1) {
+            loadMatchInModal(currentMatchIndex + 1);
+        }
+    });
+
+    // ===== About Modal =====
+    const aboutBtn = document.getElementById('aboutBtn');
+    const aboutModal = document.getElementById('aboutModal');
+    const aboutCloseBtn = document.getElementById('aboutCloseBtn');
+
+    if (aboutBtn && aboutModal && aboutCloseBtn) {
+        aboutBtn.addEventListener('click', () => {
+            aboutModal.classList.add('visible');
+        });
+
+        aboutCloseBtn.addEventListener('click', () => {
+            aboutModal.classList.remove('visible');
+        });
+
+        // Fermer en cliquant en dehors
+        aboutModal.addEventListener('click', (e) => {
+            if (e.target === aboutModal) {
+                aboutModal.classList.remove('visible');
+            }
+        });
+    }
+
+    // Initialiser l'Intersection Observer pour le lazy loading
+    initViewerObserver();
 
     console.log('HoldGen - Mode Mur avec Sélection de Prises initialisé');
     console.log(`API configurée sur: ${API_URL}`);
