@@ -13,7 +13,28 @@
 </head>
 
 <body>
-    <!-- Header avec Logo -->
+    <!--
+    ECRAN DE CHARGEMENT INITIAL MONGODB
+    Affiche la progression du chargement de la base de données
+    -->
+    <div id="initialLoadingScreen" class="initial-loading-screen">
+        <div class="loading-content">
+            <div class="logo-loading">
+                <img src="images/logo-arkose-noir-413x450.png" alt="Arkose Logo" class="logo-loading-img">
+            </div>
+            <h2>Chargement de la base de données...</h2>
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="dbProgressBar"></div>
+            </div>
+            <p id="dbLoadingText" class="db-loading-text">0 / 0 prises chargées</p>
+            <p class="db-loading-detail" id="dbLoadingDetail">Connexion en cours...</p>
+        </div>
+    </div>
+
+    <!--
+    HEADER ET LOGO
+    Navigation principale et barre de titre
+    -->
     <header class="header">
         <div class="logo">
             <img src="images/logo-arkose-noir-413x450.png" alt="Arkose Logo" class="logo-img">
@@ -25,7 +46,10 @@
         </button>
     </header>
 
-    <!-- Contenu Principal -->
+    <!--
+    CONTENU PRINCIPAL
+    Zone pour le plan de la salle et affichage des murs
+    -->
     <main class="main-content">
         <!-- Titre de la section -->
         <div class="section-title">
@@ -33,13 +57,12 @@
             <p>Cliquez sur un mur pour télécharger un fichier</p>
         </div>
 
-        <!-- Plan SVG de la salle d'escalade - Reproduction EXACTE -->
+        <!--
+        PLAN SVG DE LA SALLE D'ESCALADE
+        Représentation visuelle des différents murs
+        -->
         <div class="plan-container">
             <svg viewBox="0 0 520 580" class="climbing-plan" id="climbingPlan">
-
-                <!-- ========== ZONE PRINCIPALE - CONTOUR EXTÉRIEUR ========== -->
-
-                <!-- MUR 1: Grand trapèze gris FONCÉ en haut à gauche -->
                 <g class="wall-group" data-wall="mur-1" data-name="Mur 1">
                     <polygon class="wall wall-dark" points="48,72 48,140 115,140 140,105 140,52 95,52" />
                 </g>

@@ -18,15 +18,18 @@ from PIL import Image
 import matplotlib.colors as mcolors
 
 app = Flask(__name__)
-CORS(app)  # Permettre les requêtes cross-origin depuis le frontend
+CORS(app)
 
-# Répertoire de base (projet)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MATCHING_ZONES_DIR = os.path.join(BASE_DIR, "Matching_zones")
 
-# =====================================================================
-# FONCTIONS COULEUR
-# =====================================================================
+"""
+FONCTIONS COULEUR
+- rgb_to_lab: Conversion RGB vers LAB pour comparaison perceptuelle  
+- get_color_info_hsv: Extraction couleur dominante d'un point cloud
+- get_color_name: Classification des couleurs
+- compute_color_match: Comparaison de deux couleurs
+"""
 
 def rgb_to_lab(rgb):
     """Convertit RGB (0-1) vers LAB pour comparaison perceptuelle."""
@@ -136,14 +139,14 @@ def compute_color_match(source_hsv, target_hsv, hue_threshold=60.0, value_thresh
                 return False, f"Teinte différente"
 
 
-# =====================================================================
-# CONVERSION GLB VERS PLY AVEC COULEURS
-# =====================================================================
+"""
+CONVERSION GLB VERS PLY AVEC COULEURS
+Convertit un fichier GLB en PLY avec couleurs bakées depuis la texture
+"""
 
 def convert_glb_to_colored_ply(glb_path, ply_path):
     """
     Convertit un fichier GLB en PLY avec couleurs bakées depuis la texture.
-    Inspiré de convert_glb_to_pcd_ply.py
     
     Args:
         glb_path: Chemin vers le fichier GLB source
@@ -152,10 +155,8 @@ def convert_glb_to_colored_ply(glb_path, ply_path):
     Returns:
         o3d.geometry.PointCloud: Le point cloud coloré
     """
-    # Charger le GLB avec trimesh
     tm = trimesh.load(glb_path)
     
-    # Fusionner les sous-meshes si c'est une scène
     if isinstance(tm, trimesh.Scene):
         print("GLB détecté comme Scene → fusion des sous-mesh")
         mesh = trimesh.util.concatenate([m for m in tm.geometry.values()])
@@ -165,45 +166,43 @@ def convert_glb_to_colored_ply(glb_path, ply_path):
     vertices = mesh.vertices
     faces = mesh.faces
     
-    # Vérifier qu'il y a une texture
     if mesh.visual.kind != "texture":
         raise ValueError("Le GLB n'a pas de texture UV à baker.")
     
-    # Récupérer la texture PIL
     base_tex = mesh.visual.material.baseColorTexture
     if base_tex is None:
         raise ValueError("Le matériau n'a pas de baseColorTexture.")
-    texture_image = base_tex.convert("RGB")  # c'est déjà un PIL Image
+    texture_image = base_tex.convert("RGB")
     
     tex_w, tex_h = texture_image.size
     tex_pixels = np.array(texture_image)
     
-    # UV → pixels
-    uv = mesh.visual.uv  # Nx2
+    uv = mesh.visual.uv
     u = (uv[:,0] * (tex_w - 1)).astype(int)
     v = ((1 - uv[:,1]) * (tex_h - 1)).astype(int)
     
     vertex_colors = tex_pixels[v, u, :]
     
-    # Créer le mesh Open3D et sauvegarder en PLY
     mesh_o3d = o3d.geometry.TriangleMesh()
     mesh_o3d.vertices = o3d.utility.Vector3dVector(vertices)
     mesh_o3d.triangles = o3d.utility.Vector3iVector(faces)
     mesh_o3d.vertex_colors = o3d.utility.Vector3dVector(vertex_colors / 255.0)
     mesh_o3d.compute_vertex_normals()
     
-    # Sauvegarder le PLY
     o3d.io.write_triangle_mesh(ply_path, mesh_o3d)
     print(f"PLY coloré sauvegardé dans : {ply_path}")
     
-    # Convertir en point cloud pour retourner
     pcd = o3d.io.read_point_cloud(ply_path)
     return pcd
 
 
-# =====================================================================
-# CLASSE MATCHER POUR API
-# =====================================================================
+"""
+CLASSE MATCHER POUR API
+Pipeline de matching en 3 phases:
+- Phase 0: Filtrage couleur
+- Phase 1: Filtrage eigenvalues/forme
+- Phase 2: Matching précis RANSAC/ICP
+"""
 
 class HoldMatcherAPI:
     """Version API du matcher pour le frontend."""
@@ -216,7 +215,6 @@ class HoldMatcherAPI:
         self.value_threshold = value_threshold
         self.use_color_filter = use_color_filter
         
-        # Extraire couleur source
         self.source_color_hsv = None
         self.source_color_name = None
         if self.source_raw.has_colors():
@@ -227,7 +225,6 @@ class HoldMatcherAPI:
         else:
             self.use_color_filter = False
         
-        # Normaliser source
         self.source_normalized, self.source_eigenvalues = self.normalize_and_get_eigenvalues(
             self.source_raw, "SOURCE"
         )
@@ -536,16 +533,13 @@ class HoldMatcherAPI:
     
     def run_pipeline(self, progress_callback=None):
         """Pipeline complet en 3 phases."""
-        # Phase 0
         passed_color = self.phase0_color_screening()
         
         if not passed_color:
             return []
         
-        # Phase 1
         self.phase1_eigenvalues_screening(target_files=passed_color)
         
-        # Phase 2 avec callback de progression
         self.phase2_detailed_matching(progress_callback=progress_callback)
         
         return self.get_top_results(3)
@@ -598,9 +592,7 @@ def health_check():
 
 @app.route('/api/ply', methods=['GET'])
 def serve_ply():
-    """
-    Sert un fichier PLY pour la visualisation 3D.
-    """
+    """Sert un fichier PLY pour la visualisation 3D."""
     from flask import send_file
     
     ply_path = request.args.get('path', '')
@@ -619,9 +611,7 @@ def serve_ply():
 
 @app.route('/api/glb', methods=['GET'])
 def serve_glb():
-    """
-    Sert un fichier GLB pour la visualisation 3D.
-    """
+    """Sert un fichier GLB pour la visualisation 3D."""
     from flask import send_file
     
     glb_path = request.args.get('path', '')
@@ -690,9 +680,7 @@ def preview_ply():
 
 @app.route('/api/ply_json', methods=['GET'])
 def ply_to_json():
-    """
-    Convertit un fichier PLY en JSON pour la visualisation 3D.
-    """
+    """Convertit un fichier PLY en JSON pour la visualisation 3D."""
     ply_path = request.args.get('path', '')
     
     if not ply_path or not os.path.exists(ply_path):
@@ -724,7 +712,7 @@ def ply_to_json():
 @app.route('/api/convert_glb', methods=['POST'])
 def convert_glb():
     """
-    Convertit un fichier GLB en PLY avec couleurs et crée une session pour l'isolation des prises.
+    Convertit un fichier GLB en PLY avec couleurs et crée une session.
     Cette route fonctionne comme /api/load_wall mais accepte les fichiers GLB.
     """
     try:
@@ -1011,15 +999,16 @@ def match_stream():
         return jsonify({'error': str(e)}), 500
 
 # =====================================================================
-# NOUVELLES ROUTES POUR LE MODE MUR
+# STOCKAGE SESSIONS ET CONSTANTES DBSCAN
 # =====================================================================
 
-# Stockage temporaire des murs chargés et des prises isolées
-wall_sessions = {}
+"""
+MODE MUR: Isolation manuelle et automatique des prises
+- wall_sessions: Stockage temporaire des murs chargés
+- DBSCAN_EPS, MIN_CLUSTER_SIZE: Paramètres de clustering
+"""
 
-# ==========================================
-# CONSTANTES POUR DBSCAN (AUTO ISOLATION)
-# ==========================================
+wall_sessions = {}
 SEUIL_RANSAC_CM = 0.09
 NB_ITERATIONS_DECAPAGE = 3
 MIN_POINTS_POUR_MUR = 5000
@@ -1030,13 +1019,12 @@ HUE_BOIS_MIN = 0.05
 HUE_BOIS_MAX = 0.105
 SEUIL_SATURATION_FLUO = 0.40
 
-# Distance de fusion DBSCAN
 DBSCAN_EPS = 0.03
 DBSCAN_MIN_POINTS = 10
 MIN_CLUSTER_SIZE = 100
 
 def get_dominant_color_name_dbscan(pcd):
-    """Détermine la couleur dominante d'un cluster (méthode script DBSCAN)."""
+    """Détermine la couleur dominante d'un cluster."""
     if not pcd.has_colors() or len(pcd.points) == 0: return "inconnu"
     rgb = np.asarray(pcd.colors)
     avg_rgb = np.median(rgb, axis=0)
@@ -1055,15 +1043,13 @@ def get_dominant_color_name_dbscan(pcd):
 def auto_isolate_dbscan_api(pcd):
     """
     Isole les prises automatiquement via DBSCAN.
-    Retourne une liste de clusters (indices des points) ET les indices des points candidats (sans mur).
+    Retourne: liste de clusters (indices), liste des points candidats (sans mur)
     """
-    # On garde un tableau d'indices `original_indices` qui suit les coupes.
     current_pcd = pcd
     current_original_indices = np.arange(len(pcd.points))
     
     print(f"Auto-Isolation: {len(current_pcd.points)} points initiaux")
     
-    # 1. Nettoyage RANSAC (Bulldozer)
     for i in range(NB_ITERATIONS_DECAPAGE):
         plane_model, inliers = current_pcd.segment_plane(distance_threshold=SEUIL_RANSAC_CM/100,
                                                          ransac_n=3,
@@ -1071,13 +1057,11 @@ def auto_isolate_dbscan_api(pcd):
         if len(inliers) < MIN_POINTS_POUR_MUR:
             break
             
-        # Les inliers sont relatifs à current_pcd
         current_pcd = current_pcd.select_by_index(inliers, invert=True)
         current_original_indices = np.delete(current_original_indices, inliers)
         
     print(f"Après RANSAC: {len(current_pcd.points)} points")
     
-    # 2. Filtre Couleur
     if current_pcd.has_colors():
         rgb = np.asarray(current_pcd.colors)
         hsv = mcolors.rgb_to_hsv(rgb)
@@ -1098,17 +1082,14 @@ def auto_isolate_dbscan_api(pcd):
     if len(current_pcd.points) == 0:
         return [], []
 
-    # 3. Nettoyage Bruit
     try:
         current_pcd, ind_clean = current_pcd.remove_statistical_outlier(nb_neighbors=50, std_ratio=1.0)
         current_original_indices = current_original_indices[ind_clean]
     except:
-        pass # Peut échouer si trop peu de points
+        pass
         
-    # POINTS CANDIDATS (juste avant DBSCAN)
     candidate_indices = current_original_indices.tolist()
 
-    # 4. Clustering DBSCAN
     labels = np.array(current_pcd.cluster_dbscan(eps=DBSCAN_EPS, min_points=DBSCAN_MIN_POINTS))
     
     if len(labels) == 0:
@@ -1231,7 +1212,7 @@ def expand_from_seed_api(pcd, seed_idx, plane_model, wall_mask, config=None):
 @app.route('/api/load_wall', methods=['POST'])
 def load_wall():
     """
-    Charge un fichier PLY de mur, détecte le plan et retourne les points pour visualisation.
+    Charge un fichier PLY de mur, détecte le plan et retourne les points.
     """
     try:
         if 'file' not in request.files:

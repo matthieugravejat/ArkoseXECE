@@ -5,7 +5,14 @@
  * Mode MUR: Charge un PLY de mur, sélection des prises par clic, matching
  */
 
-// Configuration API
+/*
+CONFIGURATION ET VARIABLES GLOBALES
+- API_URL: Endpoint du serveur Flask
+- wallScene, wallCamera, wallRenderer: Contexte Three.js pour le mur
+- isolatedHolds: Stockage des prises isolées
+- HOLD_COLORS: Palette de couleurs pour les prises
+*/
+
 const API_URL = 'http://localhost:5001';
 
 // Variables globales Three.js
@@ -13,37 +20,158 @@ let wallScene, wallCamera, wallRenderer, wallControls;
 let wallPointCloud = null;
 let wallAnimationId = null;
 
-// Optimisation: Lazy loading des viewers 3D
-let activeViewers = new Map(); // {viewerId: {viewer, animationId, isPaused}}
-let viewerObserver = null; // Intersection Observer
+let activeViewers = new Map();
+let viewerObserver = null;
 
 // État de l'application
 let currentSessionId = null;
 let wallCenter = { x: 0, y: 0, z: 0 };
-let isolatedHolds = [];  // {holdId, indices, color}
-let holdMatchResults = {};  // {holdId: [matches]}
+let isolatedHolds = [];
+let holdMatchResults = {};
 let resultViewers = [];
 let raycaster = null;
 let mouse = null;
-let isolationMode = 'manual'; // 'manual' ou 'dbscan'
+let isolationMode = 'manual';
 let dbscanPointCloud = null;
-let dbscanCandidateIndices = null; // Mapping: index local dans dbscanPointCloud -> index global session
+let dbscanCandidateIndices = null;
 
-// Couleurs pour les prises isolées
+let originalWallPointCount = 0;
+
 const HOLD_COLORS = [
-    0xff0000, // Rouge
-    0x00ff00, // Vert
-    0x0000ff, // Bleu
-    0xffff00, // Jaune
-    0xff00ff, // Magenta
-    0x00ffff, // Cyan
-    0xff8000, // Orange
-    0x8000ff, // Violet
-    0x00ff80, // Vert menthe
-    0xff0080, // Rose
+    0xff0000, 0x00ff00, 0x0000ff, 0xffff00, 0xff00ff,
+    0x00ffff, 0xff8000, 0x8000ff, 0x00ff80, 0xff0080,
 ];
 
 document.addEventListener('DOMContentLoaded', () => {
+    /*
+    CHARGEMENT INITIAL
+    - Suivi de la progression du chargement MongoDB
+    - Affichage barre de progression
+    */
+    
+    async function checkDatabaseLoading() {
+        const loadingScreen = document.getElementById('initialLoadingScreen');
+        const progressBar = document.getElementById('dbProgressBar');
+        const loadingText = document.getElementById('dbLoadingText');
+        const loadingDetail = document.getElementById('dbLoadingDetail');
+
+        if (!loadingScreen) return;
+
+        console.log("🚀 Démarrage du suivi de chargement MongoDB...");
+
+        let retryCount = 0;
+        const maxRetries = 5;
+        let stuckCount = 0; // Compteur pour détecter si bloqué à 0/0
+
+        while (true) {
+            try {
+                const response = await fetch(`${API_URL}/api/loading_status`);
+
+                if (!response.ok) {
+                    throw new Error(`Erreur HTTP: ${response.status}`);
+                }
+
+                const data = await response.json();
+                
+                console.log("Loading status:", data); // Debug
+
+                if (data.status === 'ready') {
+                    // Chargement terminé
+                    if (progressBar) progressBar.style.width = '100%';
+                    if (loadingText) loadingText.textContent = data.message || 'Prêt!';
+                    if (loadingDetail) loadingDetail.textContent = 'Prêt!';
+
+                    console.log("✅ Chargement MongoDB terminé!");
+
+                    // Attendre un peu pour montrer le 100%
+                    await new Promise(resolve => setTimeout(resolve, 800));
+
+                    // Masquer l'écran
+                    loadingScreen.classList.add('hidden');
+                    setTimeout(() => {
+                        loadingScreen.style.display = 'none';
+                    }, 500);
+
+                    break;
+                } else if (data.status === 'error') {
+                    // Erreur
+                    if (loadingDetail) {
+                        loadingDetail.textContent = data.message;
+                        loadingDetail.style.color = '#ff4d4f';
+                    }
+                    console.error("❌ Erreur chargement MongoDB:", data.message);
+                    // On ne break pas pour permettre un retry éventuel côté serveur ou restart
+                    await new Promise(resolve => setTimeout(resolve, 5000));
+                } else {
+                    // En cours
+                    const current = data.current || 0;
+                    const total = data.total || 1; // Éviter division par 0
+                    const percent = Math.min(100, Math.round((current / total) * 100));
+
+                    if (progressBar) progressBar.style.width = `${percent}%`;
+                    if (loadingText) loadingText.textContent = `${current} / ${total} prises chargées`;
+                    if (loadingDetail) loadingDetail.textContent = data.message || 'Chargement en cours...';
+                    
+                    // Détecter si bloqué à 0/0 pendant trop longtemps
+                    if (current === 0 && total <= 1) {
+                        stuckCount++;
+                        console.log(`Stuck count: ${stuckCount}`);
+                        
+                        // Après 5 secondes bloqué à 0/0, vérifier si l'API répond bien
+                        if (stuckCount >= 5) {
+                            console.log("⚠️ Semble bloqué, vérification health check...");
+                            try {
+                                const healthResponse = await fetch(`${API_URL}/api/health`);
+                                if (healthResponse.ok) {
+                                    // L'API répond, peut-être le cache est déjà chargé
+                                    console.log("API répond, forçage passage...");
+                                    if (progressBar) progressBar.style.width = '100%';
+                                    if (loadingText) loadingText.textContent = 'Base de données prête';
+                                    if (loadingDetail) loadingDetail.textContent = 'Prêt!';
+                                    
+                                    await new Promise(resolve => setTimeout(resolve, 500));
+                                    loadingScreen.classList.add('hidden');
+                                    setTimeout(() => {
+                                        loadingScreen.style.display = 'none';
+                                    }, 500);
+                                    break;
+                                }
+                            } catch (e) {
+                                console.log("Health check failed:", e);
+                            }
+                        }
+                    } else {
+                        stuckCount = 0; // Reset si on a du progrès
+                    }
+                }
+
+                // Attendre avant la prochaine vérification
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                retryCount = 0; // Reset retry count on success
+
+            } catch (error) {
+                console.error('Erreur connexion API loading:', error);
+                retryCount++;
+
+                if (loadingDetail) loadingDetail.textContent = `Erreur de connexion (tentative ${retryCount}/${maxRetries})...`;
+
+                if (retryCount >= maxRetries) {
+                    if (loadingDetail) {
+                        loadingDetail.textContent = "Impossible de joindre le serveur. Vérifiez qu'il est lancé.";
+                        loadingDetail.style.color = '#ff4d4f';
+                    }
+                    // Continue trying but slower
+                    await new Promise(resolve => setTimeout(resolve, 5000));
+                } else {
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                }
+            }
+        }
+    }
+
+    // Lancer la vérification immédiatement
+    checkDatabaseLoading();
+
     // Éléments DOM
     const wallGroups = document.querySelectorAll('.wall-group');
     const dropzoneContainer = document.getElementById('dropzoneContainer');
@@ -117,8 +245,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
 
                 // Visualisation immédiate
-                // Note: highlightIsolatedHold met à jour dbscanPointCloud et wallPointCloud
-                // Si DBSCAN mode n'est pas actif, on voit wallPointCloud.
                 highlightIsolatedHold(hold.indices, holdColor);
             });
 
@@ -296,16 +422,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Ajouter à la liste des prises isolées
             const holdColor = HOLD_COLORS[isolatedHolds.length % HOLD_COLORS.length];
+
+            // MODIFICATION: Intégrer les points reconstruits directement dans le nuage de points
+            let allIndices = [...data.indices]; // Indices originaux
+            
+            if (data.reconstructed_points && data.reconstructed_points.length > 0) {
+                console.log(`Intégration de ${data.reconstructed_points.length} points reconstruits au mur`);
+                const newIndices = addReconstructedPointsToWall(
+                    data.reconstructed_points, 
+                    data.reconstructed_colors
+                );
+                allIndices = [...data.indices, ...newIndices]; // Fusionner tous les indices
+            }
+
             isolatedHolds.push({
                 holdId: data.hold_id,
-                indices: data.indices,
+                indices: allIndices, // TOUS les indices (originaux + reconstruits)
                 color: holdColor,
-                pointCount: data.point_count,
+                pointCount: allIndices.length,
                 matches: null
             });
 
-            // Mettre à jour la visualisation
-            highlightIsolatedHold(data.indices, holdColor);
+            // Colorer TOUS les points de la prise (originaux + reconstruits)
+            highlightIsolatedHold(allIndices, holdColor);
             updateHoldCountBadge();
 
         } catch (error) {
@@ -313,6 +452,125 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('Erreur isolation:', error);
             alert('Erreur: ' + error.message);
         }
+    }
+
+    /**
+     * Ajoute les points reconstruits directement dans le wallPointCloud
+     * @returns {Array} Les nouveaux indices ajoutés
+     */
+    function addReconstructedPointsToWall(reconstructedPoints, reconstructedColors) {
+        if (!wallPointCloud || !reconstructedPoints || reconstructedPoints.length === 0) {
+            return [];
+        }
+
+        const currentPos = wallPointCloud.geometry.attributes.position.array;
+        const currentCol = wallPointCloud.geometry.attributes.color.array;
+        const currentOriginal = wallPointCloud.userData.originalColors;
+        
+        const numNewPoints = reconstructedPoints.length;
+        const currentNumPoints = currentPos.length / 3;
+        
+        console.log(`Adding ${numNewPoints} reconstructed points to wall (current: ${currentNumPoints})`);
+        
+        // Créer de nouveaux arrays plus grands
+        const newPos = new Float32Array(currentPos.length + numNewPoints * 3);
+        const newCol = new Float32Array(currentCol.length + numNewPoints * 3);
+        const newOriginal = new Float32Array(currentOriginal.length + numNewPoints * 3);
+        
+        // Copier les anciens
+        newPos.set(currentPos);
+        newCol.set(currentCol);
+        newOriginal.set(currentOriginal);
+        
+        // Ajouter les nouveaux points
+        const newIndices = [];
+        for (let i = 0; i < numNewPoints; i++) {
+            const pt = reconstructedPoints[i];
+            const col = reconstructedColors[i] || [0.5, 0.5, 0.5]; // Gris par défaut
+            
+            const idx = currentNumPoints + i;
+            newIndices.push(idx);
+            
+            newPos[idx * 3] = pt[0];
+            newPos[idx * 3 + 1] = pt[1];
+            newPos[idx * 3 + 2] = pt[2];
+            
+            // Couleurs (0-1 float)
+            newCol[idx * 3] = col[0];
+            newCol[idx * 3 + 1] = col[1];
+            newCol[idx * 3 + 2] = col[2];
+            
+            newOriginal[idx * 3] = col[0];
+            newOriginal[idx * 3 + 1] = col[1];
+            newOriginal[idx * 3 + 2] = col[2];
+        }
+        
+        // Créer un nouveau geometry (on ne peut pas juste resize en Three.js)
+        const newGeometry = new THREE.BufferGeometry();
+        newGeometry.setAttribute('position', new THREE.BufferAttribute(newPos, 3));
+        newGeometry.setAttribute('color', new THREE.BufferAttribute(newCol, 3));
+        
+        // Remplacer le geometry
+        wallPointCloud.geometry.dispose();
+        wallPointCloud.geometry = newGeometry;
+        wallPointCloud.userData.originalColors = newOriginal;
+        
+        // Si en mode DBSCAN, ajouter aussi au nuage DBSCAN
+        if (isolationMode === 'dbscan' && dbscanPointCloud) {
+            addReconstructedPointsToDBSCAN(reconstructedPoints, reconstructedColors, newIndices);
+        }
+        
+        return newIndices;
+    }
+
+    /**
+     * Ajoute les points reconstruits au dbscanPointCloud (si actif)
+     */
+    function addReconstructedPointsToDBSCAN(reconstructedPoints, reconstructedColors, globalIndices) {
+        if (!dbscanPointCloud) return;
+        
+        const currentPos = dbscanPointCloud.geometry.attributes.position.array;
+        const currentCol = dbscanPointCloud.geometry.attributes.color.array;
+        
+        const numNewPoints = reconstructedPoints.length;
+        const currentNumPoints = currentPos.length / 3;
+        
+        // Créer de nouveaux arrays
+        const newPos = new Float32Array(currentPos.length + numNewPoints * 3);
+        const newCol = new Float32Array(currentCol.length + numNewPoints * 3);
+        
+        newPos.set(currentPos);
+        newCol.set(currentCol);
+        
+        for (let i = 0; i < numNewPoints; i++) {
+            const pt = reconstructedPoints[i];
+            const col = reconstructedColors[i] || [0.5, 0.5, 0.5];
+            
+            const idx = currentNumPoints + i;
+            
+            newPos[idx * 3] = pt[0];
+            newPos[idx * 3 + 1] = pt[1];
+            newPos[idx * 3 + 2] = pt[2];
+            
+            newCol[idx * 3] = col[0];
+            newCol[idx * 3 + 1] = col[1];
+            newCol[idx * 3 + 2] = col[2];
+        }
+        
+        // Mettre à jour le mapping global
+        if (dbscanCandidateIndices) {
+            const newMapping = [...dbscanCandidateIndices];
+            globalIndices.forEach(gi => newMapping.push(gi));
+            dbscanCandidateIndices = newMapping;
+        }
+        
+        // Remplacer le geometry
+        const newGeometry = new THREE.BufferGeometry();
+        newGeometry.setAttribute('position', new THREE.BufferAttribute(newPos, 3));
+        newGeometry.setAttribute('color', new THREE.BufferAttribute(newCol, 3));
+        
+        dbscanPointCloud.geometry.dispose();
+        dbscanPointCloud.geometry = newGeometry;
     }
 
     /**
@@ -327,9 +585,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const b = (color & 255) / 255;
 
             indices.forEach(idx => {
-                colors[idx * 3] = r;
-                colors[idx * 3 + 1] = g;
-                colors[idx * 3 + 2] = b;
+                if (idx * 3 + 2 < colors.length) {
+                    colors[idx * 3] = r;
+                    colors[idx * 3 + 1] = g;
+                    colors[idx * 3 + 2] = b;
+                }
             });
 
             wallPointCloud.geometry.attributes.color.needsUpdate = true;
@@ -482,6 +742,10 @@ document.addEventListener('DOMContentLoaded', () => {
         wallPointCloud = new THREE.Points(geometry, material);
         wallPointCloud.userData.originalColors = new Float32Array(colorArray); // Sauvegarder couleurs originales
         wallScene.add(wallPointCloud);
+
+        // NOUVEAU: Stocker le nombre de points originaux
+        originalWallPointCount = data.points.length;
+        console.log(`Original wall point count stored: ${originalWallPointCount}`);
 
         // Positionner la caméra
         const cameraDistance = maxDim * 2;
@@ -953,6 +1217,9 @@ document.addEventListener('DOMContentLoaded', () => {
             wallPointCloud = null;
         }
 
+        // Reset le compteur de points originaux
+        originalWallPointCount = 0;
+
         // Nettoyer la session
         if (currentSessionId) {
             fetch(`${API_URL}/api/clear_session`, {
@@ -1231,27 +1498,43 @@ document.addEventListener('DOMContentLoaded', () => {
         isolatedHolds = [];
         updateHoldCountBadge();
 
-        // Restaurer couleurs
-        if (wallPointCloud.userData.originalColors) {
-            const colors = wallPointCloud.geometry.attributes.color.array;
-            const original = wallPointCloud.userData.originalColors;
-            for (let i = 0; i < original.length; i++) {
-                colors[i] = original[i];
+        // Tronquer les points ajoutés et restaurer les couleurs originales
+        if (wallPointCloud.userData.originalColors && originalWallPointCount > 0) {
+            const positions = wallPointCloud.geometry.attributes.position.array;
+            const colors = wallPointCloud.userData.originalColors;
+            
+            // Si des points ont été ajoutés, recréer le geometry original
+            const currentCount = positions.length / 3;
+            if (currentCount > originalWallPointCount) {
+                console.log(`Restoring wall: ${currentCount} -> ${originalWallPointCount} points`);
+                
+                const newPos = new Float32Array(originalWallPointCount * 3);
+                const newCol = new Float32Array(originalWallPointCount * 3);
+                const newOriginal = new Float32Array(originalWallPointCount * 3);
+                
+                for (let i = 0; i < originalWallPointCount * 3; i++) {
+                    newPos[i] = positions[i];
+                    newCol[i] = colors[i];
+                    newOriginal[i] = colors[i];
+                }
+                
+                const newGeometry = new THREE.BufferGeometry();
+                newGeometry.setAttribute('position', new THREE.BufferAttribute(newPos, 3));
+                newGeometry.setAttribute('color', new THREE.BufferAttribute(newCol, 3));
+                
+                wallPointCloud.geometry.dispose();
+                wallPointCloud.geometry = newGeometry;
+                wallPointCloud.userData.originalColors = newOriginal;
+            } else {
+                // Juste restaurer les couleurs
+                const colArray = wallPointCloud.geometry.attributes.color.array;
+                for (let i = 0; i < colors.length; i++) {
+                    colArray[i] = colors[i];
+                }
+                wallPointCloud.geometry.attributes.color.needsUpdate = true;
             }
-            wallPointCloud.geometry.attributes.color.needsUpdate = true;
         }
 
-        // Nettoyer côté serveur aussi ? 
-        // Pas strictement nécessaire car on enverra les nouveaux IDs, 
-        // mais pour être propre on pourrait vider la session['isolated_holds'].
-        // Comme l'API est stateless pour les IDs (on renvoie tout ou on isole un par un),
-        // Le endpoint `isolate_hold` ajoute à une liste.
-        // Le endpoint `auto_isolate` ajoute aussi.
-        // Si on vide le client, le serveur a toujours les anciennes prises dans sa liste `isolated_holds`.
-        // Ce n'est pas grave tant qu'on ne demande pas de matcher des IDs qui n'existent plus pour le client.
-        // MAIS si on ré-ajoute, les IDs vont continuer d'augmenter côté serveur (0, 1, 2... puis 10, 11...).
-        // Pour être propre, on devrait appeler un endpoint reset_holds.
-        // Mais bon, `clear_session` vide tout (y compris le mur).
         // Reset mode
         deactivateDBSCANMode();
     }
